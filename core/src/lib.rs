@@ -1,0 +1,24 @@
+//! Ядро SIGame-RS.
+//!
+//! Модель паков и (позже) правила игры — чистая логика, не зависящая
+//! ни от интерфейса, ни от сети.
+//!
+//! Модули:
+//! - [`pack`] — структуры данных пака (что лежит в `pack.json`);
+//! - [`archive`] — чтение/запись файла `.sgpack` (zip + `pack.json` + `media/`);
+//! - [`error`] — типы ошибок.
+
+pub mod archive;
+pub mod error;
+pub mod game;
+pub mod pack;
+
+pub use archive::PackArchive;
+pub use error::{PackError, Result};
+pub use game::{
+    CurrentQuestion, FinalState, Game, GameConfig, GameError, Phase, Player, PlayerId,
+};
+pub use pack::{Content, Pack, Question, Round, Theme};
+
+/// Версия формата паков `.sgpack`. Пишется в `pack.json` для будущей совместимости.
+pub const PACK_FORMAT_VERSION: u32 = 1;

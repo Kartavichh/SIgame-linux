@@ -1,0 +1,13 @@
+[package]
+name = "sigame-server"
+version = "0.1.0"
+edition = "2021"
+description = "Игровой сервер SIGame-RS (использует sigame-core)"
+
+[dependencies]
+sigame-core = { path = "../core" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Игровой протокол — TCP из стандартной библиотеки (без внешних крейтов).
+# tiny_http — только для HTTP-раздачи медиа клиентам.
+tiny_http = "0.12"

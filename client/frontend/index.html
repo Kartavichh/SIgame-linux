@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>SIGame-RS</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <header>
+    <h1>SIGame-RS</h1>
+    <nav class="modes">
+      <button id="mode-view" class="active">Просмотр</button>
+      <button id="mode-edit">Редактор</button>
+      <button id="mode-play">Игра</button>
+    </nav>
+  </header>
+
+  <!-- ===== Режим просмотра ===== -->
+  <section id="view-section">
+    <div class="controls">
+      <button id="btn-demo">Открыть демо-пак</button>
+      <input id="path-input" type="text" placeholder="путь к .sgpack" />
+      <button id="btn-open">Открыть</button>
+    </div>
+    <p id="status" class="status"></p>
+    <nav id="rounds" class="rounds"></nav>
+    <main id="board" class="board"></main>
+  </section>
+
+  <!-- ===== Режим редактора ===== -->
+  <section id="edit-section" class="hidden">
+    <div class="controls">
+      <button id="ed-new">Новый</button>
+      <button id="ed-open">Открыть .sgpack</button>
+      <button id="ed-save">Сохранить как…</button>
+      <label>Название <input id="ed-name" type="text" /></label>
+      <label>Автор <input id="ed-author" type="text" /></label>
+    </div>
+    <p id="ed-status" class="status"></p>
+    <nav id="ed-rounds" class="rounds"></nav>
+    <div id="ed-round" class="ed-round"></div>
+  </section>
+
+  <!-- ===== Режим игры (по сети) ===== -->
+  <section id="play-section" class="hidden">
+    <div class="controls">
+      <input id="net-host" type="text" value="127.0.0.1" size="12" />
+      <input id="net-port" type="number" value="7777" min="1" max="65535" />
+      <input id="net-name" type="text" placeholder="ваше имя" />
+      <label><input id="net-host-role" type="checkbox" /> я ведущий</label>
+      <button id="net-connect">Подключиться</button>
+      <button id="net-disconnect" disabled>Отключиться</button>
+    </div>
+    <p id="net-status" class="status"></p>
+
+    <div id="play-game" class="hidden">
+      <div id="play-meta" class="play-meta"></div>
+      <div class="play-cols">
+        <aside id="play-players" class="play-players"></aside>
+        <main id="play-main" class="play-main"></main>
+      </div>
+      <div id="play-controls" class="play-controls"></div>
+    </div>
+  </section>
+
+  <!-- Оверлей вопроса (режим просмотра) -->
+  <div id="overlay" class="overlay hidden">
+    <div class="card">
+      <div id="question-content" class="question-content"></div>
+      <p id="media-debug" class="status"></p>
+      <div id="answer" class="answer hidden"></div>
+      <div class="card-buttons">
+        <button id="btn-answer">Показать ответ</button>
+        <button id="btn-close">Закрыть</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="main.js"></script>
+  <script src="app.js"></script>
+  <script src="editor.js"></script>
+  <script src="net.js"></script>
+</body>
+</html>

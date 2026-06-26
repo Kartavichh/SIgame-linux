@@ -1,0 +1,15 @@
+[package]
+name = "sigame-core"
+version = "0.1.0"
+edition = "2021"
+description = "Ядро игры: модель паков и правила (без UI и сети)"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# zip: только нужное (хранение + deflate), без лишних кодеков (aes/bzip2/zstd)
+zip = { version = "2", default-features = false, features = ["deflate"] }
+thiserror = "2"
+
+[dev-dependencies]
+tempfile = "3"

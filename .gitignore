@@ -1,0 +1,10 @@
+# Rust
+/target
+**/target
+
+# Сборочные артефакты Tauri
+/client/src-tauri/gen
+
+# Системное
+.DS_Store
+*.swp
