@@ -17,12 +17,25 @@ pub enum ClientMsg {
         #[serde(default)]
         host: bool,
     },
+    /// Изменить настройки партии в лобби (только ведущий).
+    Settings {
+        cat_must_give: bool,
+        no_risk_double: bool,
+    },
     /// Начать игру (только ведущий).
     Start,
     /// Выбрать клетку табло (текущий выбирающий игрок).
     Pick { theme: usize, question: usize },
     /// Нажать кнопку (игрок).
     Buzz,
+    /// Аукцион: повысить ставку (игрок, чей ход).
+    Bid { amount: i64 },
+    /// Аукцион: ва-банк — весь свой счёт (игрок, чей ход).
+    AllIn,
+    /// Аукцион: пас (игрок, чей ход).
+    Pass,
+    /// Кот в мешке: передать вопрос игроку `target` (выбравший).
+    Give { target: PlayerId },
     /// Вердикт по ответу (только ведущий).
     Judge { correct: bool },
     /// Никто не нажал — показать ответ и закрыть вопрос (только ведущий).
@@ -72,6 +85,31 @@ pub struct Snapshot {
     pub current: Option<CurrentView>,
     /// Состояние финала (заполняется только в финальных фазах).
     pub finale: Option<FinalView>,
+    /// Состояние аукциона (только в фазе торгов).
+    pub auction: Option<AuctionView>,
+    /// Настройки правил партии (видны всем, меняет ведущий в лобби).
+    pub settings: SettingsView,
+}
+
+/// Настройки правил партии в снимке.
+#[derive(Debug, Serialize)]
+pub struct SettingsView {
+    pub cat_must_give: bool,
+    pub no_risk_double: bool,
+}
+
+/// Снимок текущих торгов на аукционе.
+#[derive(Debug, Serialize)]
+pub struct AuctionView {
+    pub price: u32,
+    /// Чей сейчас ход торговаться.
+    pub current_bidder: Option<PlayerId>,
+    pub high_bid: i64,
+    pub high_bidder: Option<PlayerId>,
+    /// Игроки, вышедшие из торгов.
+    pub passed: Vec<PlayerId>,
+    /// Открытие: ставку ещё никто не делал (ходит выбравший, пас запрещён).
+    pub opening: bool,
 }
 
 /// Снимок финального раунда (адаптирован под получателя).
@@ -144,6 +182,12 @@ pub struct CurrentView {
     pub theme: usize,
     pub question: usize,
     pub price: u32,
+    /// Тип вопроса: `normal` / `auction` / `cat_in_bag` / `no_risk`.
+    pub kind: String,
+    /// Одиночный ответ (особый вопрос): гонки кнопок нет.
+    pub solo: bool,
+    /// Сколько начислят за верный ответ (для аукциона — выигравшая ставка).
+    pub reward: i64,
     pub content: Vec<Content>,
     pub buzzed: Option<PlayerId>,
     /// Игроки, уже ошибшиеся на этом вопросе (им нельзя жать кнопку снова).

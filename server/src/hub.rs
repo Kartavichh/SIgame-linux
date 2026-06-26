@@ -4,7 +4,7 @@
 //! кнопку «первым».
 
 use crate::protocol::*;
-use sigame_core::{Game, Phase, PlayerId};
+use sigame_core::{Game, GameSettings, Phase, PlayerId, QuestionKind};
 use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::net::TcpStream;
@@ -122,6 +122,12 @@ impl Hub {
 
         match msg {
             ClientMsg::Hello { .. } => Err("повторный hello".into()),
+            ClientMsg::Settings { cat_must_give, no_risk_double } => {
+                self.require_host(is_host)?;
+                self.game
+                    .set_settings(GameSettings { cat_must_give, no_risk_double })
+                    .map_err(|e| e.to_string())
+            }
             ClientMsg::Start => {
                 self.require_host(is_host)?;
                 self.game.start_game().map_err(|e| e.to_string())
@@ -133,6 +139,22 @@ impl Hub {
             ClientMsg::Buzz => {
                 let pid = pid.ok_or("ведущий не нажимает кнопку")?;
                 self.game.buzz(pid).map_err(|e| e.to_string())
+            }
+            ClientMsg::Bid { amount } => {
+                let pid = pid.ok_or("ведущий не торгуется")?;
+                self.game.bid(pid, amount).map_err(|e| e.to_string())
+            }
+            ClientMsg::AllIn => {
+                let pid = pid.ok_or("ведущий не торгуется")?;
+                self.game.all_in(pid).map_err(|e| e.to_string())
+            }
+            ClientMsg::Pass => {
+                let pid = pid.ok_or("ведущий не торгуется")?;
+                self.game.pass(pid).map_err(|e| e.to_string())
+            }
+            ClientMsg::Give { target } => {
+                let pid = pid.ok_or("ведущий не передаёт кота")?;
+                self.game.give(pid, target).map_err(|e| e.to_string())
             }
             ClientMsg::Judge { correct } => {
                 self.require_host(is_host)?;
@@ -249,23 +271,44 @@ impl Hub {
             })
             .unwrap_or_default();
 
+        let phase = game.phase();
         let current = game.current().map(|cur| {
             let q = &rounds[ri].themes[cur.theme].questions[cur.question];
+            // Содержимое «кота» во время передачи видит только ведущий —
+            // выбравший и остальные не должны знать вопрос заранее.
+            let hide_content = phase == Phase::CatGive && !for_host;
             CurrentView {
                 theme: cur.theme,
                 question: cur.question,
                 price: cur.price,
-                content: q.content.clone(),
+                kind: kind_name(cur.kind).to_string(),
+                solo: cur.solo,
+                reward: cur.reward,
+                content: if hide_content { Vec::new() } else { q.content.clone() },
                 buzzed: cur.buzzed,
                 locked_out: cur.locked_out.iter().copied().collect(),
                 answer: if for_host { Some(q.answer.clone()) } else { None },
             }
         });
 
+        let auction = game.auction().map(|a| AuctionView {
+            price: a.price,
+            current_bidder: a.current_bidder(),
+            high_bid: a.high_bid,
+            high_bidder: a.high_bidder,
+            passed: a.passed.iter().copied().collect(),
+            opening: a.high_bidder.is_none(),
+        });
+
         let finale = game.finale().map(|fs| self.final_view(fs, viewer, for_host));
 
+        let settings = SettingsView {
+            cat_must_give: game.settings().cat_must_give,
+            no_risk_double: game.settings().no_risk_double,
+        };
+
         Snapshot {
-            phase: phase_name(game.phase()).to_string(),
+            phase: phase_name(phase).to_string(),
             players,
             round_index: ri,
             round_count: rounds.len(),
@@ -274,6 +317,8 @@ impl Hub {
             board,
             current,
             finale,
+            auction,
+            settings,
         }
     }
 
@@ -362,11 +407,22 @@ fn write_msg(stream: &mut TcpStream, msg: &ServerMsg) {
     }
 }
 
+fn kind_name(k: QuestionKind) -> &'static str {
+    match k {
+        QuestionKind::Normal => "normal",
+        QuestionKind::Auction => "auction",
+        QuestionKind::CatInBag => "cat_in_bag",
+        QuestionKind::NoRisk => "no_risk",
+    }
+}
+
 fn phase_name(p: Phase) -> &'static str {
     match p {
         Phase::Lobby => "lobby",
         Phase::Picking => "picking",
         Phase::Question => "question",
+        Phase::Auction => "auction",
+        Phase::CatGive => "cat_give",
         Phase::Answering => "answering",
         Phase::RoundOver => "round_over",
         Phase::FinalThemeRemoval => "final_theme_removal",

@@ -50,11 +50,32 @@ pub struct Theme {
     pub questions: Vec<Question>,
 }
 
-/// Вопрос: стоимость, содержимое (текст/медиа) и ответ.
+/// Тип вопроса. Обычный — гонка кнопок; остальные — особые механики.
+///
+/// В JSON: `"normal"`, `"auction"`, `"cat_in_bag"`, `"no_risk"`.
+/// По умолчанию `Normal` — старые паки без поля читаются как обычные.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QuestionKind {
+    /// Обычный вопрос: гонка кнопок, верно +номинал, неверно −номинал.
+    #[default]
+    Normal,
+    /// Аукцион: игроки торгуются ставками, отвечает поставивший больше всех.
+    Auction,
+    /// Кот в мешке: выбравший передаёт вопрос игроку (правило — в настройках).
+    CatInBag,
+    /// Вопрос без риска: отвечает выбравший, при ошибке штрафа нет.
+    NoRisk,
+}
+
+/// Вопрос: тип, стоимость, содержимое (текст/медиа) и ответ.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Question {
     /// Стоимость вопроса (очки).
     pub price: u32,
+    /// Тип вопроса (обычный/особый). По умолчанию обычный.
+    #[serde(default)]
+    pub kind: QuestionKind,
     /// Содержимое вопроса по порядку показа.
     #[serde(default)]
     pub content: Vec<Content>,
@@ -144,6 +165,7 @@ mod tests {
                     name: "История".into(),
                     questions: vec![Question {
                         price: 100,
+                        kind: QuestionKind::Normal,
                         content: vec![
                             Content::Text {
                                 value: "Кто написал «Войну и мир»?".into(),

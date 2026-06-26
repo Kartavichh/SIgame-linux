@@ -7,7 +7,7 @@
 //!
 //! Финальный раунд здесь пока не реализован — он отдельным этапом.
 
-use crate::pack::Pack;
+use crate::pack::{Pack, QuestionKind};
 use std::collections::{HashMap, HashSet};
 use thiserror::Error;
 
@@ -40,6 +40,27 @@ impl Default for GameConfig {
     }
 }
 
+/// Настройки правил партии. Ведущий задаёт их в лобби до старта игры
+/// (по образцу настроек SIGame). Влияют на особые вопросы.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GameSettings {
+    /// «Кот в мешке»: `true` — выбравший обязан отдать вопрос другому игроку;
+    /// `false` — может оставить себе.
+    pub cat_must_give: bool,
+    /// «Вопрос без риска»: `true` — награда удвоенная (`+2×номинал`);
+    /// `false` — обычная (`+номинал`). Штрафа за ошибку нет в обоих случаях.
+    pub no_risk_double: bool,
+}
+
+impl Default for GameSettings {
+    fn default() -> Self {
+        Self {
+            cat_must_give: true,
+            no_risk_double: false,
+        }
+    }
+}
+
 /// Фаза партии.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Phase {
@@ -49,7 +70,12 @@ pub enum Phase {
     Picking,
     /// Вопрос показан, ждём нажатия кнопки.
     Question,
-    /// Кто-то нажал, ждём вердикта ведущего.
+    /// Аукцион: игроки по очереди торгуются ставками.
+    Auction,
+    /// Кот в мешке: выбравший выбирает, кому передать вопрос.
+    CatGive,
+    /// Кто-то отвечает (нажал кнопку, выиграл аукцион, получил кота или вопрос
+    /// без риска), ждём вердикта ведущего.
     Answering,
     /// Все клетки раунда сыграны, ждём перехода к следующему раунду.
     RoundOver,
@@ -71,12 +97,47 @@ pub struct CurrentQuestion {
     pub theme: usize,
     pub question: usize,
     pub price: u32,
+    /// Тип вопроса (обычный/особый).
+    pub kind: QuestionKind,
+    /// Одиночный ответ: отвечает один игрок, гонки кнопок нет, при ошибке вопрос
+    /// закрывается (а не открывается снова). Так играются аукцион, кот, без риска.
+    pub solo: bool,
+    /// Сколько начислить за верный ответ.
+    pub reward: i64,
+    /// Сколько списать за неверный (0 — без штрафа, как в «без риска»).
+    pub penalty: i64,
     /// Кто сейчас отвечает (в фазе [`Phase::Answering`]).
     pub buzzed: Option<PlayerId>,
     /// Игроки, уже ошибшиеся на этом вопросе (повторно нажать не могут).
     pub locked_out: HashSet<PlayerId>,
     /// Открыт ли приём нажатий прямо сейчас.
     pub buzzing_open: bool,
+}
+
+/// Состояние торгов на аукционе.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuctionState {
+    pub theme: usize,
+    pub question: usize,
+    /// Номинал клетки (минимальная открывающая ставка).
+    pub price: u32,
+    /// Порядок хода: первым выбравший, затем остальные игроки по порядку.
+    pub order: Vec<PlayerId>,
+    /// Чей сейчас ход (индекс в [`AuctionState::order`]).
+    pub turn: usize,
+    /// Текущая наибольшая ставка.
+    pub high_bid: i64,
+    /// Кто сделал текущую наибольшую ставку.
+    pub high_bidder: Option<PlayerId>,
+    /// Игроки, вышедшие из торгов (спасовавшие или не способные перебить).
+    pub passed: HashSet<PlayerId>,
+}
+
+impl AuctionState {
+    /// Чей сейчас ход торговаться.
+    pub fn current_bidder(&self) -> Option<PlayerId> {
+        self.order.get(self.turn).copied()
+    }
 }
 
 /// Ошибка применения команды к игре.
@@ -102,6 +163,8 @@ pub enum GameError {
     NotParticipant,
     #[error("недопустимая ставка")]
     BadBet,
+    #[error("нельзя передать вопрос этому игроку")]
+    InvalidTransfer,
 }
 
 /// Состояние финального раунда.
@@ -145,6 +208,7 @@ impl FinalState {
 /// Состояние партии и правила переходов.
 pub struct Game {
     config: GameConfig,
+    settings: GameSettings,
     pack: Pack,
     players: Vec<Player>,
     next_id: PlayerId,
@@ -154,6 +218,7 @@ pub struct Game {
     used: HashSet<(usize, usize)>,
     picker: Option<PlayerId>,
     current: Option<CurrentQuestion>,
+    auction: Option<AuctionState>,
     finale: Option<FinalState>,
 }
 
@@ -162,6 +227,7 @@ impl Game {
     pub fn new(pack: Pack, config: GameConfig) -> Self {
         Self {
             config,
+            settings: GameSettings::default(),
             pack,
             players: Vec::new(),
             next_id: 1,
@@ -170,8 +236,18 @@ impl Game {
             used: HashSet::new(),
             picker: None,
             current: None,
+            auction: None,
             finale: None,
         }
+    }
+
+    /// Изменить настройки правил (только в лобби, до старта игры).
+    pub fn set_settings(&mut self, settings: GameSettings) -> Result<(), GameError> {
+        if self.phase != Phase::Lobby {
+            return Err(GameError::WrongPhase);
+        }
+        self.settings = settings;
+        Ok(())
     }
 
     // ----------------------------- Команды -----------------------------
@@ -236,17 +312,257 @@ impl Game {
         }
 
         let price = q.price;
+        let kind = q.kind;
         self.used.insert((theme, question));
+
+        match kind {
+            QuestionKind::Normal => self.start_normal(theme, question, price),
+            QuestionKind::Auction => self.start_auction(theme, question, price, player),
+            QuestionKind::CatInBag => self.start_cat(theme, question, price, player),
+            QuestionKind::NoRisk => self.start_no_risk(theme, question, price, player),
+        }
+        Ok(())
+    }
+
+    /// Обычный вопрос: показываем, открываем гонку кнопок.
+    fn start_normal(&mut self, theme: usize, question: usize, price: u32) {
         self.current = Some(CurrentQuestion {
             theme,
             question,
             price,
+            kind: QuestionKind::Normal,
+            solo: false,
+            reward: price as i64,
+            penalty: price as i64,
             buzzed: None,
             locked_out: HashSet::new(),
             buzzing_open: true,
         });
         self.phase = Phase::Question;
+    }
+
+    /// Перевести вопрос в режим одиночного ответа конкретного игрока.
+    fn start_solo(
+        &mut self,
+        theme: usize,
+        question: usize,
+        price: u32,
+        kind: QuestionKind,
+        answerer: PlayerId,
+        reward: i64,
+        penalty: i64,
+    ) {
+        self.current = Some(CurrentQuestion {
+            theme,
+            question,
+            price,
+            kind,
+            solo: true,
+            reward,
+            penalty,
+            buzzed: Some(answerer),
+            locked_out: HashSet::new(),
+            buzzing_open: false,
+        });
+        self.phase = Phase::Answering;
+    }
+
+    /// Вопрос без риска: отвечает выбравший, штрафа за ошибку нет.
+    fn start_no_risk(&mut self, theme: usize, question: usize, price: u32, picker: PlayerId) {
+        let mult = if self.settings.no_risk_double { 2 } else { 1 };
+        self.start_solo(theme, question, price, QuestionKind::NoRisk, picker, price as i64 * mult, 0);
+    }
+
+    /// Кот в мешке: выбравший должен передать вопрос (либо может оставить себе —
+    /// зависит от настройки). Если других игроков нет, играет сам.
+    fn start_cat(&mut self, theme: usize, question: usize, price: u32, picker: PlayerId) {
+        let has_others = self.players.iter().any(|p| p.id != picker);
+        if self.settings.cat_must_give && !has_others {
+            // Отдавать некому — выбравший играет сам.
+            self.start_solo(theme, question, price, QuestionKind::CatInBag, picker, price as i64, price as i64);
+            return;
+        }
+        self.current = Some(CurrentQuestion {
+            theme,
+            question,
+            price,
+            kind: QuestionKind::CatInBag,
+            solo: true,
+            reward: price as i64,
+            penalty: price as i64,
+            buzzed: None, // получателя выберут командой give
+            locked_out: HashSet::new(),
+            buzzing_open: false,
+        });
+        self.phase = Phase::CatGive;
+    }
+
+    /// Передать «кота» игроку (делает выбравший). Если настройка разрешает —
+    /// может оставить себе (`target == picker`).
+    pub fn give(&mut self, player: PlayerId, target: PlayerId) -> Result<(), GameError> {
+        if self.phase != Phase::CatGive {
+            return Err(GameError::WrongPhase);
+        }
+        if Some(player) != self.picker {
+            return Err(GameError::NotYourTurn);
+        }
+        if !self.has_player(target) {
+            return Err(GameError::NoSuchPlayer);
+        }
+        if self.settings.cat_must_give && target == player {
+            return Err(GameError::InvalidTransfer);
+        }
+        let cur = self.current.as_mut().expect("в фазе CatGive есть вопрос");
+        cur.buzzed = Some(target);
+        self.phase = Phase::Answering;
         Ok(())
+    }
+
+    /// Аукцион: запускаем торги (выбравший ходит первым).
+    fn start_auction(&mut self, theme: usize, question: usize, price: u32, picker: PlayerId) {
+        let mut order = vec![picker];
+        for p in &self.players {
+            if p.id != picker {
+                order.push(p.id);
+            }
+        }
+        let picker_score = self.score(picker).unwrap_or(0);
+        // Вырожденные случаи: один игрок или выбравший не может сделать ставку.
+        if order.len() == 1 || picker_score < 1 {
+            self.start_solo(theme, question, price, QuestionKind::Auction, picker, price as i64, price as i64);
+            return;
+        }
+        self.auction = Some(AuctionState {
+            theme,
+            question,
+            price,
+            order,
+            turn: 0,
+            high_bid: 0,
+            high_bidder: None,
+            passed: HashSet::new(),
+        });
+        self.phase = Phase::Auction;
+    }
+
+    /// Сделать (повысить) ставку на аукционе.
+    pub fn bid(&mut self, player: PlayerId, amount: i64) -> Result<(), GameError> {
+        if self.phase != Phase::Auction {
+            return Err(GameError::WrongPhase);
+        }
+        let score = self.score(player).ok_or(GameError::NoSuchPlayer)?;
+        {
+            let a = self.auction.as_ref().expect("в аукционе есть состояние");
+            if Some(player) != a.current_bidder() {
+                return Err(GameError::NotYourTurn);
+            }
+            let opening = a.high_bidder.is_none();
+            if amount > score {
+                return Err(GameError::BadBet);
+            }
+            if opening {
+                // Открывающая ставка выбравшего — не ниже номинала.
+                if amount < a.price as i64 {
+                    return Err(GameError::BadBet);
+                }
+            } else if amount <= a.high_bid {
+                return Err(GameError::BadBet);
+            }
+        }
+        let a = self.auction.as_mut().unwrap();
+        a.high_bid = amount;
+        a.high_bidder = Some(player);
+        self.auction_next();
+        Ok(())
+    }
+
+    /// Ва-банк: поставить весь свой счёт.
+    pub fn all_in(&mut self, player: PlayerId) -> Result<(), GameError> {
+        if self.phase != Phase::Auction {
+            return Err(GameError::WrongPhase);
+        }
+        let score = self.score(player).ok_or(GameError::NoSuchPlayer)?;
+        {
+            let a = self.auction.as_ref().expect("в аукционе есть состояние");
+            if Some(player) != a.current_bidder() {
+                return Err(GameError::NotYourTurn);
+            }
+            let opening = a.high_bidder.is_none();
+            if score < 1 {
+                return Err(GameError::BadBet);
+            }
+            // Не на открытии ва-банк должен перебивать текущую ставку.
+            if !opening && score <= a.high_bid {
+                return Err(GameError::BadBet);
+            }
+        }
+        let a = self.auction.as_mut().unwrap();
+        a.high_bid = score;
+        a.high_bidder = Some(player);
+        self.auction_next();
+        Ok(())
+    }
+
+    /// Пас на аукционе (выход из торгов). Выбравший не может пасовать на открытии.
+    pub fn pass(&mut self, player: PlayerId) -> Result<(), GameError> {
+        if self.phase != Phase::Auction {
+            return Err(GameError::WrongPhase);
+        }
+        {
+            let a = self.auction.as_ref().expect("в аукционе есть состояние");
+            if Some(player) != a.current_bidder() {
+                return Err(GameError::NotYourTurn);
+            }
+            if a.high_bidder.is_none() {
+                // Открытие: выбравший обязан назвать ставку (или ва-банк).
+                return Err(GameError::BadBet);
+            }
+        }
+        self.auction.as_mut().unwrap().passed.insert(player);
+        self.auction_next();
+        Ok(())
+    }
+
+    /// Передать ход следующему участнику торгов; авто-пас тех, кто не может
+    /// перебить ставку; завершить аукцион, когда остался один участник.
+    fn auction_next(&mut self) {
+        loop {
+            let (order_len, passed_len, high_bid) = {
+                let a = self.auction.as_ref().unwrap();
+                (a.order.len(), a.passed.len(), a.high_bid)
+            };
+            if order_len - passed_len <= 1 {
+                self.resolve_auction();
+                return;
+            }
+            let next_p = {
+                let a = self.auction.as_mut().unwrap();
+                a.turn = (a.turn + 1) % a.order.len();
+                a.order[a.turn]
+            };
+            if self.auction.as_ref().unwrap().passed.contains(&next_p) {
+                continue;
+            }
+            // Не может перебить текущую ставку — автоматически выходит.
+            let score = self.score(next_p).unwrap_or(0);
+            if score <= high_bid {
+                self.auction.as_mut().unwrap().passed.insert(next_p);
+                continue;
+            }
+            return; // ход next_p
+        }
+    }
+
+    /// Завершить аукцион: победитель отвечает один за свою ставку.
+    fn resolve_auction(&mut self) {
+        let a = self.auction.take().expect("в аукционе есть состояние");
+        match a.high_bidder {
+            Some(winner) => {
+                let bid = a.high_bid;
+                self.start_solo(a.theme, a.question, a.price, QuestionKind::Auction, winner, bid, bid);
+            }
+            None => self.finish_question(None),
+        }
     }
 
     /// Нажать кнопку. Первый успешный вызов получает право ответа.
@@ -275,17 +591,34 @@ impl Game {
         if self.phase != Phase::Answering {
             return Err(GameError::WrongPhase);
         }
-        let (player, price) = {
+        let (player, solo, reward, penalty) = {
             let cur = self.current.as_ref().expect("в фазе Answering есть вопрос");
-            (cur.buzzed.expect("в фазе Answering есть отвечающий"), cur.price as i64)
+            (
+                cur.buzzed.expect("в фазе Answering есть отвечающий"),
+                cur.solo,
+                cur.reward,
+                cur.penalty,
+            )
         };
 
+        // Одиночный ответ (аукцион/кот/без риска): вопрос закрывается в любом случае.
+        if solo {
+            if correct {
+                self.add_score(player, reward);
+                self.finish_question(Some(player));
+            } else {
+                self.add_score(player, -penalty);
+                self.finish_question(None);
+            }
+            return Ok(());
+        }
+
         if correct {
-            self.add_score(player, price);
+            self.add_score(player, reward);
             // Угадавший становится выбирающим.
             self.finish_question(Some(player));
         } else {
-            self.add_score(player, -price);
+            self.add_score(player, -penalty);
             let all_locked = {
                 let cur = self.current.as_mut().unwrap();
                 cur.locked_out.insert(player);
@@ -463,6 +796,12 @@ impl Game {
     pub fn config(&self) -> &GameConfig {
         &self.config
     }
+    pub fn settings(&self) -> &GameSettings {
+        &self.settings
+    }
+    pub fn auction(&self) -> Option<&AuctionState> {
+        self.auction.as_ref()
+    }
     pub fn pack(&self) -> &Pack {
         &self.pack
     }
@@ -537,7 +876,7 @@ impl Game {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pack::{Content, Question, Round, Theme};
+    use crate::pack::{Content, Question, QuestionKind, Round, Theme};
 
     /// Пак: 1 раунд, 1 тема, два вопроса (100 и 200).
     fn one_round_pack() -> Pack {
@@ -551,8 +890,8 @@ mod tests {
                 themes: vec![Theme {
                     name: "Тема".into(),
                     questions: vec![
-                        Question { price: 100, content: vec![Content::Text { value: "q1".into() }], answer: "a1".into() },
-                        Question { price: 200, content: vec![Content::Text { value: "q2".into() }], answer: "a2".into() },
+                        Question { price: 100, kind: QuestionKind::Normal, content: vec![Content::Text { value: "q1".into() }], answer: "a1".into() },
+                        Question { price: 200, kind: QuestionKind::Normal, content: vec![Content::Text { value: "q2".into() }], answer: "a2".into() },
                     ],
                 }],
             }],
@@ -646,6 +985,7 @@ mod tests {
     fn pack_with_final() -> Pack {
         let q = |price, a: &str| Question {
             price,
+            kind: QuestionKind::Normal,
             content: vec![Content::Text { value: "q".into() }],
             answer: a.into(),
         };
@@ -742,5 +1082,173 @@ mod tests {
         g.next_round().unwrap();
         // Нет игроков со счётом > 0 -> сразу конец игры.
         assert_eq!(g.phase(), Phase::GameOver);
+    }
+
+    /// Пак с одной темой из 4 вопросов: обычный, аукцион, кот, без риска.
+    fn special_pack() -> Pack {
+        let q = |kind: QuestionKind, a: &str| Question {
+            price: 100,
+            kind,
+            content: vec![Content::Text { value: "q".into() }],
+            answer: a.into(),
+        };
+        Pack {
+            name: "T".into(),
+            author: String::new(),
+            format_version: crate::PACK_FORMAT_VERSION,
+            rounds: vec![Round {
+                name: "Р1".into(),
+                is_final: false,
+                themes: vec![Theme {
+                    name: "Тема".into(),
+                    questions: vec![
+                        q(QuestionKind::Normal, "n"),
+                        q(QuestionKind::Auction, "auc"),
+                        q(QuestionKind::CatInBag, "cat"),
+                        q(QuestionKind::NoRisk, "nr"),
+                    ],
+                }],
+            }],
+        }
+    }
+
+    fn special_game() -> (Game, PlayerId, PlayerId, PlayerId) {
+        let mut g = Game::new(special_pack(), GameConfig::default());
+        let p1 = g.add_player("P1").unwrap();
+        let p2 = g.add_player("P2").unwrap();
+        let p3 = g.add_player("P3").unwrap();
+        g.start_game().unwrap();
+        (g, p1, p2, p3)
+    }
+
+    #[test]
+    fn no_risk_no_penalty_on_wrong() {
+        let (mut g, p1, _p2, _p3) = special_game();
+        g.pick(p1, 0, 3).unwrap(); // без риска
+        assert_eq!(g.phase(), Phase::Answering);
+        assert_eq!(g.current().unwrap().buzzed, Some(p1)); // отвечает выбравший
+        assert!(g.current().unwrap().solo);
+        g.judge(false).unwrap();
+        assert_eq!(g.score(p1), Some(0)); // штрафа нет
+        assert_eq!(g.picker(), Some(p1)); // ход остаётся
+    }
+
+    #[test]
+    fn no_risk_double_reward() {
+        let mut g = Game::new(special_pack(), GameConfig::default());
+        let a = g.add_player("A").unwrap();
+        let _b = g.add_player("B").unwrap();
+        // Настройку задаём в лобби, до старта.
+        g.set_settings(GameSettings { cat_must_give: true, no_risk_double: true }).unwrap();
+        g.start_game().unwrap();
+        g.pick(a, 0, 3).unwrap();
+        g.judge(true).unwrap();
+        assert_eq!(g.score(a), Some(200)); // удвоенный номинал
+    }
+
+    #[test]
+    fn set_settings_rejected_after_start() {
+        let (mut g, _p1, _p2, _p3) = special_game();
+        assert_eq!(
+            g.set_settings(GameSettings::default()),
+            Err(GameError::WrongPhase)
+        );
+    }
+
+    #[test]
+    fn cat_must_give_to_other() {
+        let (mut g, p1, p2, _p3) = special_game();
+        g.pick(p1, 0, 2).unwrap(); // кот
+        assert_eq!(g.phase(), Phase::CatGive);
+        // себе оставить нельзя (настройка по умолчанию)
+        assert_eq!(g.give(p1, p1), Err(GameError::InvalidTransfer));
+        g.give(p1, p2).unwrap();
+        assert_eq!(g.phase(), Phase::Answering);
+        assert_eq!(g.current().unwrap().buzzed, Some(p2));
+        g.judge(true).unwrap();
+        assert_eq!(g.score(p2), Some(100));
+        assert_eq!(g.picker(), Some(p2)); // ответивший верно стал выбирающим
+    }
+
+    #[test]
+    fn cat_wrong_penalizes_receiver_keeps_picker() {
+        let (mut g, p1, p2, _p3) = special_game();
+        g.pick(p1, 0, 2).unwrap();
+        g.give(p1, p2).unwrap();
+        g.judge(false).unwrap();
+        assert_eq!(g.score(p2), Some(-100)); // штраф получателю
+        assert_eq!(g.picker(), Some(p1)); // ход у выбравшего
+    }
+
+    #[test]
+    fn cat_can_keep_when_allowed() {
+        let mut g = Game::new(special_pack(), GameConfig::default());
+        let p1 = g.add_player("P1").unwrap();
+        let _p2 = g.add_player("P2").unwrap();
+        g.set_settings(GameSettings { cat_must_give: false, no_risk_double: false }).unwrap();
+        g.start_game().unwrap();
+        g.pick(p1, 0, 2).unwrap();
+        assert_eq!(g.phase(), Phase::CatGive);
+        g.give(p1, p1).unwrap(); // оставить себе можно
+        assert_eq!(g.current().unwrap().buzzed, Some(p1));
+        g.judge(true).unwrap();
+        assert_eq!(g.score(p1), Some(100));
+    }
+
+    #[test]
+    fn auction_full_bidding() {
+        let (mut g, p1, p2, p3) = special_game();
+        // Дадим игрокам очки для торгов.
+        g.add_score(p1, 500);
+        g.add_score(p2, 300);
+        g.add_score(p3, 200);
+        g.pick(p1, 0, 1).unwrap(); // аукцион
+        assert_eq!(g.phase(), Phase::Auction);
+        assert_eq!(g.auction().unwrap().current_bidder(), Some(p1));
+        // выбравший не может пасовать на открытии
+        assert_eq!(g.pass(p1), Err(GameError::BadBet));
+        // открытие ниже номинала запрещено
+        assert_eq!(g.bid(p1, 50), Err(GameError::BadBet));
+        g.bid(p1, 100).unwrap();
+        assert_eq!(g.auction().unwrap().current_bidder(), Some(p2));
+        g.bid(p2, 150).unwrap();
+        assert_eq!(g.auction().unwrap().current_bidder(), Some(p3));
+        g.all_in(p3).unwrap(); // ва-банк 200
+        assert_eq!(g.auction().unwrap().current_bidder(), Some(p1));
+        g.bid(p1, 250).unwrap();
+        assert_eq!(g.auction().unwrap().current_bidder(), Some(p2));
+        g.pass(p2).unwrap();
+        // p3 (200) не может перебить 250 -> авто-пас -> остаётся p1 -> ответ
+        assert_eq!(g.phase(), Phase::Answering);
+        assert_eq!(g.current().unwrap().buzzed, Some(p1));
+        assert_eq!(g.current().unwrap().reward, 250);
+        g.judge(true).unwrap();
+        assert_eq!(g.score(p1), Some(750)); // 500 + 250
+    }
+
+    #[test]
+    fn auction_all_pass_leaves_picker() {
+        let (mut g, p1, p2, p3) = special_game();
+        g.add_score(p1, 300);
+        g.add_score(p2, 300);
+        g.add_score(p3, 300);
+        g.pick(p1, 0, 1).unwrap();
+        g.bid(p1, 100).unwrap(); // открытие
+        g.pass(p2).unwrap();
+        g.pass(p3).unwrap();
+        // все спасовали -> играет p1 за 100
+        assert_eq!(g.phase(), Phase::Answering);
+        assert_eq!(g.current().unwrap().buzzed, Some(p1));
+        assert_eq!(g.current().unwrap().reward, 100);
+    }
+
+    #[test]
+    fn auction_degenerates_when_picker_broke() {
+        let (mut g, p1, _p2, _p3) = special_game();
+        // У выбравшего нет очков -> торговаться нечем -> играет один за номинал.
+        g.pick(p1, 0, 1).unwrap();
+        assert_eq!(g.phase(), Phase::Answering);
+        assert_eq!(g.current().unwrap().buzzed, Some(p1));
+        assert_eq!(g.current().unwrap().reward, 100);
     }
 }

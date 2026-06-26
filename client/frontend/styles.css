@@ -133,6 +133,10 @@ button.small { padding: .3rem .6rem; font-size: .85rem; }
   display: flex; flex-direction: column; gap: .6rem;
 }
 .ed-price { width: 7rem; }
+.ed-kind {
+  background: #ffffff14; border: 1px solid #ffffff33; color: #eef;
+  border-radius: .4rem; padding: .45rem .5rem;
+}
 
 .ed-content { display: flex; flex-direction: column; gap: .5rem; }
 .ed-item {
@@ -198,6 +202,22 @@ button.buzz {
   font-size: 1.6rem; padding: 1.2rem 2rem; background: #b03048; width: 100%;
 }
 button.buzz:hover { background: #c83a55; }
+
+/* Настройки партии в лобби */
+.play-settings {
+  margin: 1rem 0; padding: 1rem; background: #ffffff0d; border-radius: .5rem;
+  max-width: 36rem;
+}
+.play-settings h3 { margin: 0 0 .6rem; }
+.play-setting { display: flex; align-items: center; gap: .4rem; margin-top: .5rem; }
+.play-setting-hint { color: #99a; font-size: .85rem; margin: .1rem 0 .4rem 1.5rem; }
+
+/* Бейдж типа особого вопроса */
+.play-kind-badge {
+  display: inline-block; margin-bottom: .5rem; padding: .3rem .7rem;
+  background: #ffd86b22; color: #ffd86b; border-radius: .4rem;
+  font-weight: bold; font-size: 1rem;
+}
 
 /* Финал */
 .final-themes { display: flex; gap: .6rem; flex-wrap: wrap; margin: .8rem 0; }

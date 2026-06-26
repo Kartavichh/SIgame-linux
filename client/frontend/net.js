@@ -19,6 +19,8 @@
     lobby: "Лобби",
     picking: "Выбор вопроса",
     question: "Вопрос — жмите кнопку",
+    auction: "Аукцион — торги",
+    cat_give: "Кот в мешке — передача",
     answering: "Ответ игрока",
     round_over: "Раунд завершён",
     final_theme_removal: "Финал — вычёркивание тем",
@@ -26,6 +28,13 @@
     final_answers: "Финал — ответы",
     final_reveal: "Финал — вскрытие",
     game_over: "Игра окончена",
+  };
+
+  // Названия особых типов вопросов (для бейджа над вопросом).
+  const KIND = {
+    auction: "🔨 Аукцион",
+    cat_in_bag: "🐱 Кот в мешке",
+    no_risk: "🛡 Вопрос без риска",
   };
 
   const isFinalPhase = (p) => p && p.startsWith("final_");
@@ -179,6 +188,7 @@
 
     if (snap.phase === "lobby") {
       E.main.appendChild(bigState("Ожидание начала игры ведущим…"));
+      E.main.appendChild(settingsPanel(false));
       return;
     }
     if (snap.phase === "game_over") {
@@ -187,6 +197,14 @@
     }
     if (snap.phase === "round_over") {
       E.main.appendChild(bigState("Раунд завершён. Ждём ведущего…"));
+      return;
+    }
+    if (snap.phase === "auction") {
+      renderAuction();
+      return;
+    }
+    if (snap.phase === "cat_give") {
+      renderCatGive();
       return;
     }
 
@@ -236,10 +254,19 @@
 
     if (snap.phase === "lobby") {
       E.main.appendChild(bigState("Игроки собираются. Когда все готовы — «Начать игру»."));
+      E.main.appendChild(settingsPanel(true));
       return;
     }
     if (snap.phase === "game_over") {
       E.main.appendChild(gameOverBlock());
+      return;
+    }
+    if (snap.phase === "auction") {
+      renderAuction();
+      return;
+    }
+    if (snap.phase === "cat_give") {
+      renderCatGive();
       return;
     }
 
@@ -251,7 +278,8 @@
         E.main.appendChild(a);
       }
       if (snap.phase === "answering") {
-        E.main.appendChild(bigState(`Отвечает: ${nameOf(cur.buzzed)} — оцените ответ.`));
+        const extra = cur.solo ? ` (за ${cur.reward})` : "";
+        E.main.appendChild(bigState(`Отвечает: ${nameOf(cur.buzzed)}${extra} — оцените ответ.`));
       } else if (snap.phase === "question") {
         E.main.appendChild(bigState("Ждём, кто нажмёт кнопку…"));
       }
@@ -471,6 +499,131 @@
     return a;
   }
 
+  // ----------------------------- Настройки партии -----------------------------
+
+  // Панель настроек в лобби. editable=true только у ведущего.
+  function settingsPanel(editable) {
+    const s = snap.settings || { cat_must_give: true, no_risk_double: false };
+    const box = el("div", "");
+    box.className = "play-settings";
+    box.appendChild(el("h3", "Настройки партии" + (editable ? "" : " (задаёт ведущий)")));
+
+    const mk = (key, labelText, hint) => {
+      const row = el("label", "");
+      row.className = "play-setting";
+      const cb = document.createElement("input");
+      cb.type = "checkbox";
+      cb.checked = !!s[key];
+      cb.disabled = !editable;
+      if (editable) {
+        cb.addEventListener("change", () => {
+          send({
+            type: "settings",
+            cat_must_give: key === "cat_must_give" ? cb.checked : s.cat_must_give,
+            no_risk_double: key === "no_risk_double" ? cb.checked : s.no_risk_double,
+          });
+        });
+      }
+      row.appendChild(cb);
+      row.appendChild(document.createTextNode(" " + labelText));
+      box.appendChild(row);
+      if (hint) {
+        const h = el("div", hint);
+        h.className = "play-setting-hint";
+        box.appendChild(h);
+      }
+    };
+    mk("cat_must_give", "Кот в мешке: обязательно отдавать другому игроку",
+       "Выключено — выбравший может оставить кота себе.");
+    mk("no_risk_double", "Вопрос без риска: удвоенная награда",
+       "Выключено — обычная награда (номинал).");
+    return box;
+  }
+
+  // ----------------------------- Аукцион -----------------------------
+
+  function renderAuction() {
+    const a = snap.auction;
+    if (!a) return;
+    E.main.appendChild(el("h3", "🔨 Аукцион"));
+    E.main.appendChild(
+      bigState(
+        a.opening
+          ? `Открытие торгов. Минимум — номинал ${a.price}. Ходит: ${nameOf(a.current_bidder)}`
+          : `Текущая ставка: ${a.high_bid} (${nameOf(a.high_bidder)}). Ходит: ${nameOf(a.current_bidder)}`
+      )
+    );
+    if (a.passed && a.passed.length) {
+      E.main.appendChild(el("p", "Спасовали: " + a.passed.map(nameOf).join(", ")));
+    }
+    // Управление — только у игрока, чей сейчас ход.
+    if (!you.host && a.current_bidder === you.id) {
+      E.main.appendChild(bidForm(a));
+    }
+  }
+
+  function bidForm(a) {
+    const me = snap.players.find((p) => p.id === you.id);
+    const myScore = me ? me.score : 0;
+    const min = a.opening ? a.price : a.high_bid + 1;
+    const wrap = el("div", "");
+    wrap.className = "final-form";
+
+    const inp = document.createElement("input");
+    inp.type = "number";
+    inp.min = String(min);
+    inp.max = String(myScore);
+    inp.value = String(Math.min(Math.max(min, 1), myScore || min));
+    wrap.appendChild(inp);
+
+    wrap.appendChild(
+      ctrl(`Ставка (${min}…${myScore})`, () => {
+        const v = parseInt(inp.value, 10);
+        if (!(v >= min && v <= myScore)) {
+          setStatus(`Ставка должна быть от ${min} до ${myScore}.`);
+          return;
+        }
+        send({ type: "bid", amount: v });
+      }, myScore < min)
+    );
+    wrap.appendChild(ctrl(`Ва-банк (${myScore})`, () => send({ type: "all_in" }), myScore < 1));
+    if (!a.opening) {
+      wrap.appendChild(ctrl("Пас", () => send({ type: "pass" }), false, "danger"));
+    }
+    return wrap;
+  }
+
+  // ----------------------------- Кот в мешке -----------------------------
+
+  function renderCatGive() {
+    const cur = snap.current;
+    E.main.appendChild(el("h3", "🐱 Кот в мешке"));
+    if (you.host) {
+      if (cur) E.main.appendChild(questionBlock(cur));
+      if (cur && cur.answer != null) E.main.appendChild(answerBox(cur.answer));
+      E.main.appendChild(bigState(`${nameOf(snap.picker)} выбирает, кому отдать кота…`));
+      return;
+    }
+    if (snap.picker === you.id) {
+      E.main.appendChild(bigState("Вам достался кот в мешке! Выберите, кому передать вопрос:"));
+      E.main.appendChild(giveButtons());
+    } else {
+      E.main.appendChild(bigState(`${nameOf(snap.picker)} выбирает, кому передать кота…`));
+    }
+  }
+
+  function giveButtons() {
+    const wrap = el("div", "");
+    wrap.className = "final-themes";
+    const canKeep = snap.settings && !snap.settings.cat_must_give;
+    for (const p of snap.players) {
+      if (p.id === you.id && !canKeep) continue; // себе нельзя при «обязан отдать»
+      const label = p.id === you.id ? `${p.name} (себе)` : p.name;
+      wrap.appendChild(ctrl(label, () => send({ type: "give", target: p.id })));
+    }
+    return wrap;
+  }
+
   // ----------------------------- Общие блоки -----------------------------
 
   // Табло; cells кликабельны только если clickable=true.
@@ -515,6 +668,11 @@
   function questionBlock(cur) {
     const box = el("div", "");
     box.className = "play-question";
+    if (cur.kind && cur.kind !== "normal" && KIND[cur.kind]) {
+      const badge = el("div", KIND[cur.kind]);
+      badge.className = "play-kind-badge";
+      box.appendChild(badge);
+    }
     box.appendChild(el("h3", `Вопрос за ${cur.price}`));
     for (const item of cur.content) {
       if (item.type === "text") {

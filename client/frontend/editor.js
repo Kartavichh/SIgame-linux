@@ -171,7 +171,7 @@ function renderTheme(round, theme, ti) {
 
   theme.questions.forEach((q, qi) => card.appendChild(renderQuestion(theme, q, qi)));
   card.appendChild(btn("+ Вопрос", () => {
-    theme.questions.push({ price: 100, content: [], answer: "" });
+    theme.questions.push({ price: 100, kind: "normal", content: [], answer: "" });
     renderRound();
   }));
   return card;
@@ -190,6 +190,25 @@ function renderQuestion(theme, q, qi) {
   price.className = "ed-price";
   price.addEventListener("input", () => (q.price = parseInt(price.value, 10) || 0));
   head.appendChild(label("Стоимость:", price));
+
+  // Тип вопроса (обычный/особый).
+  const kindSel = document.createElement("select");
+  kindSel.className = "ed-kind";
+  for (const [val, text] of [
+    ["normal", "Обычный"],
+    ["auction", "Аукцион"],
+    ["cat_in_bag", "Кот в мешке"],
+    ["no_risk", "Без риска"],
+  ]) {
+    const opt = document.createElement("option");
+    opt.value = val;
+    opt.textContent = text;
+    kindSel.appendChild(opt);
+  }
+  kindSel.value = q.kind || "normal";
+  kindSel.addEventListener("change", () => (q.kind = kindSel.value));
+  head.appendChild(label("Тип:", kindSel));
+
   head.appendChild(btn("Удалить вопрос", () => {
     theme.questions.splice(qi, 1);
     renderRound();

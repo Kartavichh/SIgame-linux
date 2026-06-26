@@ -127,6 +127,7 @@ mod tests {
                     questions: vec![
                         Question {
                             price: 100,
+                            kind: crate::QuestionKind::Normal,
                             content: vec![Content::Text {
                                 value: "Текстовый вопрос?".into(),
                             }],
@@ -134,6 +135,7 @@ mod tests {
                         },
                         Question {
                             price: 200,
+                            kind: crate::QuestionKind::Normal,
                             content: vec![Content::Image {
                                 value: "img1.jpg".into(),
                             }],
