@@ -19,6 +19,7 @@ const E = {
 // --- Кнопки тулбара ---
 byId("ed-new").addEventListener("click", edNew);
 byId("ed-open").addEventListener("click", edOpen);
+byId("ed-import-siq").addEventListener("click", edImportSiq);
 byId("ed-save").addEventListener("click", edSave);
 E.name.addEventListener("input", () => { if (model) model.name = E.name.value; });
 E.author.addEventListener("input", () => { if (model) model.author = E.author.value; });
@@ -50,6 +51,31 @@ async function edOpen() {
     setStatus(`Открыт: ${path}`, true);
   } catch (e) {
     setStatus(`Ошибка: ${e}`);
+  }
+}
+
+async function edImportSiq() {
+  const path = await openDialog({ filters: [{ name: "SIGame .siq", extensions: ["siq"] }] });
+  if (!path) return;
+  try {
+    setStatus("Импорт .siq…");
+    const res = await invoke("import_siq", { path });
+    model = res.pack;
+    selRound = 0;
+    renderAll();
+    if (res.warnings && res.warnings.length) {
+      // Показываем сводку: импорт удался, но часть медиа не нашлась.
+      const n = res.warnings.length;
+      console.warn("Предупреждения импорта .siq:", res.warnings);
+      setStatus(
+        `Импортирован .siq (предупреждений: ${n}, см. консоль). ` +
+        `Проверьте и «Сохранить как… .sgpack».`
+      );
+    } else {
+      setStatus(`Импортирован .siq. Проверьте и «Сохранить как… .sgpack».`, true);
+    }
+  } catch (e) {
+    setStatus(`Не удалось импортировать .siq: ${e}`);
   }
 }
 

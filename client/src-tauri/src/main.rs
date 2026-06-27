@@ -150,6 +150,25 @@ fn editor_load(path: String, state: State<EditorState>) -> Result<Pack, String> 
     Ok(pack)
 }
 
+/// Результат импорта `.siq`: пак для редактора и предупреждения (например, о
+/// ненайденных медиафайлах).
+#[derive(Serialize)]
+struct SiqImport {
+    pack: Pack,
+    warnings: Vec<String>,
+}
+
+/// Импортировать пак `.siq` (родной формат SIGame) в редактор. Дальше с ним
+/// работают как с обычным паком: правят и сохраняют как `.sgpack`.
+#[tauri::command]
+fn import_siq(path: String, state: State<EditorState>) -> Result<SiqImport, String> {
+    let (archive, warnings) = sigame_core::import_siq(&path).map_err(|e| e.to_string())?;
+    extract_media(&archive.media)?; // для превью
+    let pack = archive.pack.clone();
+    *state.0.lock().unwrap() = archive;
+    Ok(SiqImport { pack, warnings })
+}
+
 /// Добавить медиафайл с диска в редактируемый пак. Возвращает итоговое имя
 /// внутри пака (с учётом возможного переименования при совпадении).
 #[tauri::command]
@@ -534,6 +553,7 @@ fn main() {
             open_pack,
             editor_new,
             editor_load,
+            import_siq,
             editor_add_media,
             editor_save,
             net_connect,

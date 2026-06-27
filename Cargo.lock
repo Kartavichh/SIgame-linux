@@ -2787,7 +2787,7 @@ checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
 
 [[package]]
 name = "sigame-client"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -2800,8 +2800,9 @@ dependencies = [
 
 [[package]]
 name = "sigame-core"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
+ "quick-xml",
  "serde",
  "serde_json",
  "tempfile",
@@ -2811,7 +2812,7 @@ dependencies = [
 
 [[package]]
 name = "sigame-server"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "serde",
  "serde_json",

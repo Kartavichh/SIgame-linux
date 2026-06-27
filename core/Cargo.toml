@@ -1,6 +1,6 @@
 [package]
 name = "sigame-core"
-version = "0.3.0"
+version = "0.3.1"
 edition = "2021"
 description = "Ядро игры: модель паков и правила (без UI и сети)"
 
@@ -10,6 +10,8 @@ serde_json = "1"
 # zip: только нужное (хранение + deflate), без лишних кодеков (aes/bzip2/zstd)
 zip = { version = "2", default-features = false, features = ["deflate"] }
 thiserror = "2"
+# quick-xml: разбор content.xml при импорте паков .siq (родной формат SIGame)
+quick-xml = "0.39"
 
 [dev-dependencies]
 tempfile = "3"

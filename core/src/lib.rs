@@ -12,9 +12,11 @@ pub mod archive;
 pub mod error;
 pub mod game;
 pub mod pack;
+pub mod siq;
 
 pub use archive::PackArchive;
 pub use error::{PackError, Result};
+pub use siq::import_siq;
 pub use game::{
     AuctionState, BuzzMode, CurrentQuestion, FinalState, Game, GameConfig, GameError, GameSettings,
     Phase, Player, PlayerId,
