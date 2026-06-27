@@ -47,7 +47,7 @@ async function openDemo() {
 async function loadPack(path) {
   try {
     setStatus("Загрузка…");
-    const pack = await invoke("open_pack", { path });
+    const pack = window.legacyizePack(await invoke("open_pack", { path }));
     state.pack = pack;
     state.mediaBase = await invoke("media_base_url");
     state.roundIndex = 0;

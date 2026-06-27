@@ -4,10 +4,11 @@
 //! кнопку «первым».
 
 use crate::protocol::*;
-use sigame_core::{Game, GameSettings, Phase, PlayerId, QuestionKind};
+use sigame_core::{BuzzMode, Game, GameError, GameSettings, Phase, PlayerId, QuestionKind};
 use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::net::TcpStream;
+use std::time::{Duration, Instant};
 
 /// Идентификатор сетевого подключения (не путать с `PlayerId` в игре).
 pub type ConnId = u64;
@@ -27,6 +28,13 @@ pub struct Hub {
     clients: HashMap<ConnId, Client>,
     /// Имя игрока → его `PlayerId`. Нужен для переподключения по имени.
     name_to_pid: HashMap<String, PlayerId>,
+    /// Когда снять блок фальстарта с игрока (отсчитывает таймер-поток сервера).
+    false_start_deadlines: HashMap<PlayerId, Instant>,
+    /// Аватарки игроков (data-URL), сохраняются между переподключениями.
+    player_avatars: HashMap<PlayerId, String>,
+    /// Имя и аватарка ведущего (он не игрок, поэтому отдельно).
+    host_name: Option<String>,
+    host_avatar: Option<String>,
 }
 
 impl Hub {
@@ -35,6 +43,10 @@ impl Hub {
             game,
             clients: HashMap::new(),
             name_to_pid: HashMap::new(),
+            false_start_deadlines: HashMap::new(),
+            player_avatars: HashMap::new(),
+            host_name: None,
+            host_avatar: None,
         }
     }
 
@@ -47,6 +59,7 @@ impl Hub {
         conn: ConnId,
         name: String,
         want_host: bool,
+        avatar: Option<String>,
         out: TcpStream,
     ) -> Result<(Option<PlayerId>, bool), String> {
         let name = name.trim().to_string();
@@ -57,6 +70,10 @@ impl Hub {
         if want_host {
             if self.clients.values().any(|c| c.host) {
                 return Err("ведущий уже подключён".into());
+            }
+            self.host_name = Some(name.clone());
+            if avatar.is_some() {
+                self.host_avatar = avatar;
             }
             self.clients.insert(conn, Client { pid: None, name, host: true, out });
             return Ok((None, true));
@@ -75,8 +92,29 @@ impl Hub {
                 pid
             }
         };
+        // Запоминаем аватарку (при переподключении сохраняем прежнюю, если новой нет).
+        if let Some(av) = avatar {
+            self.player_avatars.insert(pid, av);
+        }
         self.clients.insert(conn, Client { pid: Some(pid), name, host: false, out });
         Ok((Some(pid), false))
+    }
+
+    /// Сменить аватарку клиента (по подключению). `None` — убрать.
+    pub fn set_avatar(&mut self, conn: ConnId, avatar: Option<String>) {
+        let Some(c) = self.clients.get(&conn) else { return };
+        if c.host {
+            self.host_avatar = avatar;
+        } else if let Some(pid) = c.pid {
+            match avatar {
+                Some(av) => {
+                    self.player_avatars.insert(pid, av);
+                }
+                None => {
+                    self.player_avatars.remove(&pid);
+                }
+            }
+        }
     }
 
     /// Убрать подключение (при обрыве связи). Игрок остаётся в партии — его счёт
@@ -122,11 +160,30 @@ impl Hub {
 
         match msg {
             ClientMsg::Hello { .. } => Err("повторный hello".into()),
-            ClientMsg::Settings { cat_must_give, no_risk_double } => {
+            ClientMsg::SetAvatar { avatar } => {
+                self.set_avatar(conn, avatar);
+                Ok(())
+            }
+            ClientMsg::Settings {
+                cat_must_give,
+                no_risk_double,
+                buzz_mode,
+                false_start,
+                false_start_block_secs,
+                buzz_time_secs,
+                answer_time_secs,
+            } => {
                 self.require_host(is_host)?;
-                self.game
-                    .set_settings(GameSettings { cat_must_give, no_risk_double })
-                    .map_err(|e| e.to_string())
+                let settings = GameSettings {
+                    cat_must_give,
+                    no_risk_double,
+                    buzz_mode: parse_buzz_mode(&buzz_mode),
+                    false_start,
+                    false_start_block_secs,
+                    buzz_time_secs,
+                    answer_time_secs,
+                };
+                self.game.set_settings(settings).map_err(|e| e.to_string())
             }
             ClientMsg::Start => {
                 self.require_host(is_host)?;
@@ -138,7 +195,42 @@ impl Hub {
             }
             ClientMsg::Buzz => {
                 let pid = pid.ok_or("ведущий не нажимает кнопку")?;
-                self.game.buzz(pid).map_err(|e| e.to_string())
+                match self.game.buzz(pid) {
+                    Ok(()) => Ok(()),
+                    // Фальстарт: блокируем игрока и запоминаем, когда снять блок.
+                    // Это не ошибка для клиента — блок виден в снимке состояния.
+                    Err(GameError::FalseStart) => {
+                        let secs = self.game.settings().false_start_block_secs;
+                        self.false_start_deadlines
+                            .insert(pid, Instant::now() + Duration::from_secs(secs as u64));
+                        Ok(())
+                    }
+                    Err(e) => Err(e.to_string()),
+                }
+            }
+            ClientMsg::OpenBuzz => {
+                self.require_host(is_host)?;
+                self.game.open_buzz().map_err(|e| e.to_string())
+            }
+            ClientMsg::NextSlide => {
+                self.require_host(is_host)?;
+                self.game.next_slide().map_err(|e| e.to_string())
+            }
+            ClientMsg::PrevSlide => {
+                self.require_host(is_host)?;
+                self.game.prev_slide().map_err(|e| e.to_string())
+            }
+            ClientMsg::CloseQuestion => {
+                self.require_host(is_host)?;
+                self.game.close_question().map_err(|e| e.to_string())
+            }
+            ClientMsg::SkipQuestion => {
+                self.require_host(is_host)?;
+                self.game.skip_question().map_err(|e| e.to_string())
+            }
+            ClientMsg::SetScore { player, value } => {
+                self.require_host(is_host)?;
+                self.game.set_score(player, value).map_err(|e| e.to_string())
             }
             ClientMsg::Bid { amount } => {
                 let pid = pid.ok_or("ведущий не торгуется")?;
@@ -190,6 +282,26 @@ impl Hub {
     /// Принудительно начать игру по команде из консоли сервера.
     pub fn force_start(&mut self) -> Result<(), String> {
         self.game.start_game().map_err(|e| e.to_string())
+    }
+
+    /// Снять истёкшие блоки фальстарта. Возвращает `true`, если что-то снято
+    /// (тогда вызывающий рассылает новый снимок). Вызывает таймер-поток сервера.
+    pub fn clear_expired_false_starts(&mut self) -> bool {
+        if self.false_start_deadlines.is_empty() {
+            return false;
+        }
+        let now = Instant::now();
+        let expired: Vec<PlayerId> = self
+            .false_start_deadlines
+            .iter()
+            .filter(|(_, &deadline)| deadline <= now)
+            .map(|(&pid, _)| pid)
+            .collect();
+        for pid in &expired {
+            self.game.clear_false_start(*pid);
+            self.false_start_deadlines.remove(pid);
+        }
+        !expired.is_empty()
     }
 
     fn require_host(&self, is_host: bool) -> Result<(), String> {
@@ -244,6 +356,7 @@ impl Hub {
                 name: p.name.clone(),
                 score: p.score,
                 online: online.contains(&p.id),
+                avatar: self.player_avatars.get(&p.id).cloned(),
             })
             .collect();
 
@@ -274,9 +387,21 @@ impl Hub {
         let phase = game.phase();
         let current = game.current().map(|cur| {
             let q = &rounds[ri].themes[cur.theme].questions[cur.question];
+            // В фазе показа ответа активны слайды ответа, иначе — вопроса.
+            let slides = if phase == Phase::ShowAnswer {
+                &q.answer_slides
+            } else {
+                &q.question_slides
+            };
+            let slide_count = slides.len();
             // Содержимое «кота» во время передачи видит только ведущий —
             // выбравший и остальные не должны знать вопрос заранее.
             let hide_content = phase == Phase::CatGive && !for_host;
+            let content = if hide_content {
+                Vec::new()
+            } else {
+                slides.get(cur.slide).map(|s| s.items.clone()).unwrap_or_default()
+            };
             CurrentView {
                 theme: cur.theme,
                 question: cur.question,
@@ -284,10 +409,14 @@ impl Hub {
                 kind: kind_name(cur.kind).to_string(),
                 solo: cur.solo,
                 reward: cur.reward,
-                content: if hide_content { Vec::new() } else { q.content.clone() },
+                content,
+                slide: cur.slide,
+                slide_count,
+                buzzing_open: cur.buzzing_open,
                 buzzed: cur.buzzed,
                 locked_out: cur.locked_out.iter().copied().collect(),
-                answer: if for_host { Some(q.answer.clone()) } else { None },
+                false_started: cur.false_started.iter().copied().collect(),
+                answer: if for_host { Some(q.answer_text()) } else { None },
             }
         });
 
@@ -302,10 +431,22 @@ impl Hub {
 
         let finale = game.finale().map(|fs| self.final_view(fs, viewer, for_host));
 
+        let s = game.settings();
         let settings = SettingsView {
-            cat_must_give: game.settings().cat_must_give,
-            no_risk_double: game.settings().no_risk_double,
+            cat_must_give: s.cat_must_give,
+            no_risk_double: s.no_risk_double,
+            buzz_mode: buzz_mode_name(s.buzz_mode).to_string(),
+            false_start: s.false_start,
+            false_start_block_secs: s.false_start_block_secs,
+            buzz_time_secs: s.buzz_time_secs,
+            answer_time_secs: s.answer_time_secs,
         };
+
+        let host = self.host_name.as_ref().map(|name| HostView {
+            name: name.clone(),
+            avatar: self.host_avatar.clone(),
+            online: self.clients.values().any(|c| c.host),
+        });
 
         Snapshot {
             phase: phase_name(phase).to_string(),
@@ -319,6 +460,7 @@ impl Hub {
             finale,
             auction,
             settings,
+            host,
         }
     }
 
@@ -358,9 +500,9 @@ impl Hub {
             .chosen_theme
             .and_then(|ti| round.themes.get(ti))
             .map(|t| t.name.clone());
-        let content = chosen_q.map(|q| q.content.clone()).unwrap_or_default();
+        let content = chosen_q.map(|q| q.question_content()).unwrap_or_default();
         let answer = if for_host {
-            chosen_q.map(|q| q.answer.clone())
+            chosen_q.map(|q| q.answer_text())
         } else {
             None
         };
@@ -416,6 +558,20 @@ fn kind_name(k: QuestionKind) -> &'static str {
     }
 }
 
+fn buzz_mode_name(m: BuzzMode) -> &'static str {
+    match m {
+        BuzzMode::Manual => "manual",
+        BuzzMode::AfterLastSlide => "after_last_slide",
+    }
+}
+
+fn parse_buzz_mode(s: &str) -> BuzzMode {
+    match s {
+        "after_last_slide" => BuzzMode::AfterLastSlide,
+        _ => BuzzMode::Manual,
+    }
+}
+
 fn phase_name(p: Phase) -> &'static str {
     match p {
         Phase::Lobby => "lobby",
@@ -424,6 +580,7 @@ fn phase_name(p: Phase) -> &'static str {
         Phase::Auction => "auction",
         Phase::CatGive => "cat_give",
         Phase::Answering => "answering",
+        Phase::ShowAnswer => "show_answer",
         Phase::RoundOver => "round_over",
         Phase::FinalThemeRemoval => "final_theme_removal",
         Phase::FinalBets => "final_bets",

@@ -69,14 +69,15 @@ async function edSave() {
   }
 }
 
-async function addMedia(question) {
+// Добавить медиа-блок в конкретный слайд (его массив items).
+async function addMedia(items) {
   const path = await openDialog({
     filters: [{ name: "Медиа", extensions: ["png", "jpg", "jpeg", "gif", "webp", "webm", "mp4", "mp3", "ogg", "wav"] }],
   });
   if (!path) return;
   try {
     const res = await invoke("editor_add_media", { srcPath: path });
-    question.content.push({ type: inferType(res.filename), value: res.filename });
+    items.push({ type: inferType(res.filename), value: res.filename });
     renderRound();
   } catch (e) {
     setStatus(`Ошибка добавления медиа: ${e}`);
@@ -171,7 +172,12 @@ function renderTheme(round, theme, ti) {
 
   theme.questions.forEach((q, qi) => card.appendChild(renderQuestion(theme, q, qi)));
   card.appendChild(btn("+ Вопрос", () => {
-    theme.questions.push({ price: 100, kind: "normal", content: [], answer: "" });
+    theme.questions.push({
+      price: 100,
+      kind: "normal",
+      question_slides: [{ items: [{ type: "text", value: "" }] }],
+      answer_slides: [{ items: [{ type: "text", value: "" }] }],
+    });
     renderRound();
   }));
   return card;
@@ -215,25 +221,74 @@ function renderQuestion(theme, q, qi) {
   }, "danger"));
   box.appendChild(head);
 
-  const cont = document.createElement("div");
-  cont.className = "ed-content";
-  q.content.forEach((item, ci) => cont.appendChild(renderContentItem(q, item, ci)));
-  box.appendChild(cont);
+  // На случай старого формата в памяти — гарантируем наличие массивов слайдов.
+  if (!Array.isArray(q.question_slides)) q.question_slides = [];
+  if (!Array.isArray(q.answer_slides)) q.answer_slides = [];
+
+  box.appendChild(renderSlideSection(q.question_slides, "Слайды вопроса", "Текст вопроса"));
+  box.appendChild(renderSlideSection(q.answer_slides, "Слайды ответа", "Текст ответа"));
+  return box;
+}
+
+// Секция слайдов (вопроса или ответа): список слайдов + кнопка добавления.
+function renderSlideSection(slides, title, textPlaceholder) {
+  const sec = document.createElement("div");
+  sec.className = "ed-slides";
+
+  const h = document.createElement("div");
+  h.className = "ed-slides-title";
+  h.textContent = title;
+  sec.appendChild(h);
+
+  slides.forEach((slide, si) =>
+    sec.appendChild(renderSlide(slides, slide, si, textPlaceholder))
+  );
+
+  sec.appendChild(btn("+ Слайд", () => {
+    slides.push({ items: [] });
+    renderRound();
+  }, "small"));
+  return sec;
+}
+
+// Один слайд: шапка с перемещением/удалением, блоки и кнопки добавления блоков.
+function renderSlide(slides, slide, si, textPlaceholder) {
+  if (!Array.isArray(slide.items)) slide.items = [];
+  const card = document.createElement("div");
+  card.className = "ed-slide";
+
+  const head = document.createElement("div");
+  head.className = "ed-slide-head";
+  const cap = document.createElement("span");
+  cap.className = "ed-slide-cap";
+  cap.textContent = `Слайд ${si + 1}/${slides.length}`;
+  head.appendChild(cap);
+
+  head.appendChild(moveBtn("↑", () => move(slides, si, -1), si === 0));
+  head.appendChild(moveBtn("↓", () => move(slides, si, +1), si === slides.length - 1));
+  head.appendChild(btn("✕ слайд", () => {
+    slides.splice(si, 1);
+    renderRound();
+  }, "danger small"));
+  card.appendChild(head);
+
+  slide.items.forEach((item, ci) =>
+    card.appendChild(renderSlideItem(slide.items, item, ci, textPlaceholder))
+  );
 
   const tools = document.createElement("div");
   tools.className = "ed-tools";
   tools.appendChild(btn("+ Текст", () => {
-    q.content.push({ type: "text", value: "" });
+    slide.items.push({ type: "text", value: "" });
     renderRound();
-  }));
-  tools.appendChild(btn("+ Медиа", () => addMedia(q)));
-  box.appendChild(tools);
-
-  box.appendChild(label("Ответ:", textInput(q.answer, (v) => (q.answer = v), "Правильный ответ")));
-  return box;
+  }, "small"));
+  tools.appendChild(btn("+ Медиа", () => addMedia(slide.items), "small"));
+  card.appendChild(tools);
+  return card;
 }
 
-function renderContentItem(q, item, ci) {
+// Один блок слайда (текст или медиа) с перемещением и удалением.
+function renderSlideItem(items, item, ci, textPlaceholder) {
   const row = document.createElement("div");
   row.className = "ed-item";
 
@@ -241,7 +296,7 @@ function renderContentItem(q, item, ci) {
     const ta = document.createElement("textarea");
     ta.value = item.value;
     ta.rows = 2;
-    ta.placeholder = "Текст вопроса";
+    ta.placeholder = textPlaceholder;
     ta.addEventListener("input", () => (item.value = ta.value));
     row.appendChild(ta);
   } else {
@@ -252,11 +307,31 @@ function renderContentItem(q, item, ci) {
     row.appendChild(renderPreview(item));
   }
 
-  row.appendChild(btn("✕", () => {
-    q.content.splice(ci, 1);
+  const ctrls = document.createElement("div");
+  ctrls.className = "ed-item-ctrls";
+  ctrls.appendChild(moveBtn("↑", () => move(items, ci, -1), ci === 0));
+  ctrls.appendChild(moveBtn("↓", () => move(items, ci, +1), ci === items.length - 1));
+  ctrls.appendChild(btn("✕", () => {
+    items.splice(ci, 1);
     renderRound();
   }, "danger small"));
+  row.appendChild(ctrls);
   return row;
+}
+
+// Поменять местами элемент массива с соседним (dir = -1 вверх, +1 вниз).
+function move(arr, i, dir) {
+  const j = i + dir;
+  if (j < 0 || j >= arr.length) return;
+  [arr[i], arr[j]] = [arr[j], arr[i]];
+  renderRound();
+}
+
+// Маленькая кнопка перемещения; disabled = серая и без действия.
+function moveBtn(text, onClick, disabled) {
+  const b = btn(text, disabled ? () => {} : onClick, "small");
+  if (disabled) b.disabled = true;
+  return b;
 }
 
 function renderPreview(item) {

@@ -7,10 +7,13 @@
 
   let initialized = false;
   let connected = false;
+  let weHostServer = false;             // мы сами подняли локальный сервер партии
   let you = { id: null, host: false }; // кто мы: id игрока (или null у ведущего)
   let snap = null;                      // последний снимок состояния
   let serverHost = "127.0.0.1";        // адрес сервера (для URL медиа)
   let mediaBase = "";                   // http://<сервер>:<медиа-порт>/
+  let settingsOpen = false;             // открыто ли меню настроек (оверлей)
+  let myAvatar = null;                  // наша аватарка (компактный data-URL) или null
 
   const E = {};
 
@@ -22,6 +25,7 @@
     auction: "Аукцион — торги",
     cat_give: "Кот в мешке — передача",
     answering: "Ответ игрока",
+    show_answer: "Показ ответа",
     round_over: "Раунд завершён",
     final_theme_removal: "Финал — вычёркивание тем",
     final_bets: "Финал — ставки",
@@ -52,16 +56,192 @@
     E.status = byId("net-status");
     E.game = byId("play-game");
     E.meta = byId("play-meta");
+    E.hostBadge = byId("play-host");
     E.players = byId("play-players");
     E.main = byId("play-main");
     E.controls = byId("play-controls");
 
+    E.hostPack = byId("net-host-pack");
+    E.hostDemo = byId("net-host-demo");
+    E.avatarBtn = byId("net-avatar");
+    E.avatarPreview = byId("net-avatar-preview");
+
     E.connect.addEventListener("click", connect);
     E.disconnect.addEventListener("click", disconnect);
+    E.hostPack.addEventListener("click", hostOwnPack);
+    E.hostDemo.addEventListener("click", hostDemo);
+    E.avatarBtn.addEventListener("click", pickAvatar);
+    E.name.addEventListener("input", refreshAvatarPreview);
+    refreshAvatarPreview();
 
     listen("net:message", (e) => onMessage(e.payload));
     listen("net:closed", () => onClosed());
   };
+
+  // Запустить локальный сервер на выбранном файле .sgpack и войти ведущим.
+  async function hostOwnPack() {
+    const res = await invoke("plugin:dialog|open", {
+      options: {
+        multiple: false,
+        directory: false,
+        filters: [{ name: "SIGame pack", extensions: ["sgpack"] }],
+      },
+    });
+    const path = normalizePath(res);
+    if (path) hostGame(path);
+  }
+
+  // Запустить локальный сервер на встроенном демо-паке и войти ведущим.
+  async function hostDemo() {
+    try {
+      const path = await invoke("demo_pack_path");
+      hostGame(path);
+    } catch (err) {
+      setStatus(`Не удалось взять демо-пак: ${err}`);
+    }
+  }
+
+  async function hostGame(packPath) {
+    const port = parseInt(E.port.value, 10) || 7777;
+    const name = E.name.value.trim() || "Ведущий";
+    try {
+      // Если уже идёт партия / поднят наш сервер — корректно закрываем перед новой.
+      // Снимаем флаг заранее, чтобы обработчик закрытия старого соединения не
+      // погасил сервер, который мы вот-вот запустим.
+      weHostServer = false;
+      await invoke("net_disconnect").catch(() => {});
+      await invoke("host_stop").catch(() => {});
+
+      setStatus("Запуск сервера…");
+      await invoke("host_start", { packPath, port });
+      weHostServer = true;
+
+      E.host.value = "127.0.0.1";
+      E.role.checked = true;
+      you = { id: null, host: true };
+      serverHost = "127.0.0.1";
+      // Подключаемся к своему серверу с несколькими попытками: ему нужно
+      // немного времени, чтобы занять порт.
+      await connectWithRetry({ host: "127.0.0.1", port, name, isHost: true, avatar: myAvatar });
+      connected = true;
+      E.connect.disabled = true;
+      E.disconnect.disabled = false;
+      setStatus(`Сервер запущен на порту ${port}. Вы — ведущий. Игроки подключаются к вашему IP:${port}.`);
+    } catch (err) {
+      setStatus(`Не удалось запустить партию: ${err}`);
+      await invoke("host_stop").catch(() => {});
+      weHostServer = false;
+    }
+  }
+
+  // Несколько попыток net_connect (сервер мог ещё не успеть занять порт).
+  async function connectWithRetry(opts) {
+    let lastErr;
+    for (let i = 0; i < 12; i++) {
+      try {
+        await invoke("net_connect", opts);
+        return;
+      } catch (e) {
+        lastErr = e;
+        await new Promise((r) => setTimeout(r, 200));
+      }
+    }
+    throw lastErr;
+  }
+
+  // Диалог может вернуть строку, массив или объект {path} — приводим к строке.
+  function normalizePath(res) {
+    if (!res) return null;
+    if (typeof res === "string") return res;
+    if (Array.isArray(res)) return res.length ? normalizePath(res[0]) : null;
+    if (res.path) return res.path;
+    return null;
+  }
+
+  // ----------------------------- Аватарки -----------------------------
+
+  // Выбрать картинку файлом, уменьшить и сохранить как нашу аватарку.
+  async function pickAvatar() {
+    try {
+      const res = await invoke("plugin:dialog|open", {
+        options: {
+          multiple: false,
+          directory: false,
+          filters: [{ name: "Картинка", extensions: ["png", "jpg", "jpeg", "webp", "gif"] }],
+        },
+      });
+      const path = normalizePath(res);
+      if (!path) return;
+      const dataUrl = await invoke("read_image_data_url", { path });
+      myAvatar = await downscaleImage(dataUrl, 96);
+      refreshAvatarPreview();
+      // Если уже в партии — сразу сообщаем серверу о смене.
+      if (connected) send({ type: "set_avatar", avatar: myAvatar });
+    } catch (err) {
+      setStatus(`Не удалось загрузить аватар: ${err}`);
+    }
+  }
+
+  // Уменьшает картинку до квадрата size×size (обрезка по центру), отдаёт data-URL JPEG.
+  function downscaleImage(dataUrl, size) {
+    return new Promise((resolve, reject) => {
+      const img = new Image();
+      img.onload = () => {
+        const canvas = document.createElement("canvas");
+        canvas.width = size;
+        canvas.height = size;
+        const ctx = canvas.getContext("2d");
+        const side = Math.min(img.width, img.height);
+        const sx = (img.width - side) / 2;
+        const sy = (img.height - side) / 2;
+        ctx.drawImage(img, sx, sy, side, side, 0, 0, size, size);
+        resolve(canvas.toDataURL("image/jpeg", 0.7));
+      };
+      img.onerror = () => reject("не удалось декодировать картинку");
+      img.src = dataUrl;
+    });
+  }
+
+  // Обновить предпросмотр аватарки рядом с кнопкой.
+  function refreshAvatarPreview() {
+    if (!E.avatarPreview) return;
+    E.avatarPreview.innerHTML = "";
+    const name = E.name ? E.name.value : "";
+    E.avatarPreview.appendChild(avatarEl(name || "?", myAvatar, 32));
+  }
+
+  // Элемент аватарки: картинка либо круг-заглушка с инициалами.
+  function avatarEl(name, avatar, size) {
+    let node;
+    if (avatar) {
+      node = document.createElement("img");
+      node.src = avatar;
+    } else {
+      node = el("div", initials(name));
+      node.classList.add("avatar-fallback");
+      node.style.background = colorFromName(name);
+      node.style.fontSize = Math.round(size * 0.42) + "px";
+    }
+    node.classList.add("avatar");
+    node.style.width = size + "px";
+    node.style.height = size + "px";
+    return node;
+  }
+
+  // Инициалы из имени (одна–две буквы).
+  function initials(name) {
+    const parts = (name || "?").trim().split(/\s+/).filter(Boolean);
+    const a = parts[0] ? parts[0][0] : "";
+    const b = parts[1] ? parts[1][0] : "";
+    return (a + b).toUpperCase() || "?";
+  }
+
+  // Устойчивый цвет фона заглушки из имени.
+  function colorFromName(name) {
+    let h = 0;
+    for (const ch of name || "") h = (h * 31 + ch.charCodeAt(0)) % 360;
+    return `hsl(${h} 55% 42%)`;
+  }
 
   async function connect() {
     const name = E.name.value.trim();
@@ -75,7 +255,7 @@
     try {
       you = { id: null, host: isHost };
       serverHost = host;
-      await invoke("net_connect", { host, port, name, isHost });
+      await invoke("net_connect", { host, port, name, isHost, avatar: myAvatar });
       connected = true;
       E.connect.disabled = true;
       E.disconnect.disabled = false;
@@ -87,6 +267,10 @@
 
   async function disconnect() {
     await invoke("net_disconnect");
+    if (weHostServer) {
+      await invoke("host_stop");
+      weHostServer = false;
+    }
     onClosed();
   }
 
@@ -96,6 +280,11 @@
     E.connect.disabled = false;
     E.disconnect.disabled = true;
     E.game.classList.add("hidden");
+    // Если соединение оборвалось само (сервер упал) — снимаем флаг хостинга.
+    if (weHostServer) {
+      invoke("host_stop").catch(() => {});
+      weHostServer = false;
+    }
     setStatus("Отключено.");
   }
 
@@ -141,33 +330,140 @@
       : "";
     E.meta.textContent = `${roleLabel} · ${phaseLabel}${roundInfo ? " · " + roundInfo : ""}`;
 
+    renderHostBadge();
     renderPlayers();
     E.main.innerHTML = "";
     if (you.host) renderHostMain();
     else renderPlayerMain();
     renderControls();
+
+    // Оверлей настроек поверх всего (только в лобби).
+    const existing = byId("settings-overlay");
+    if (existing) existing.remove();
+    if (settingsOpen && snap.phase === "lobby") {
+      E.game.appendChild(settingsOverlay(you.host));
+    }
   }
 
+  // Текущие настройки с подстановкой значений по умолчанию.
+  function currentSettings() {
+    const s = snap.settings || {};
+    return {
+      cat_must_give: s.cat_must_give !== false,
+      no_risk_double: !!s.no_risk_double,
+      buzz_mode: s.buzz_mode || "manual",
+      false_start: !!s.false_start,
+      false_start_block_secs: s.false_start_block_secs ?? 3,
+      buzz_time_secs: s.buzz_time_secs ?? 5,
+      answer_time_secs: s.answer_time_secs ?? 20,
+    };
+  }
+
+  // Отправить настройки целиком (сервер требует все поля), применив изменение.
+  function sendSettings(patch) {
+    send(Object.assign({ type: "settings" }, currentSettings(), patch));
+  }
+
+  // Бегущая полоса времени (визуальный отсчёт). seconds — длительность.
+  function timeBar(seconds) {
+    const bar = el("div", "");
+    bar.className = "time-bar";
+    const fill = el("div", "");
+    fill.className = "time-bar-fill";
+    fill.style.animationDuration = `${Math.max(1, seconds || 5)}s`;
+    bar.appendChild(fill);
+    return bar;
+  }
+
+  // Бейдж ведущего слева сверху (аватар + ник), как в SIGame.
+  function renderHostBadge() {
+    E.hostBadge.innerHTML = "";
+    const h = snap.host;
+    if (!h) return;
+    const badge = el("div", "");
+    badge.className = "host-badge";
+    if (!h.online) badge.classList.add("offline");
+    badge.appendChild(avatarEl(h.name, h.avatar, 48));
+    const info = el("div", "");
+    info.className = "host-badge-info";
+    info.appendChild(el("div", "🎙 Ведущий"));
+    const nm = el("div", h.name + (h.online ? "" : " ⚪"));
+    nm.className = "host-badge-name";
+    info.appendChild(nm);
+    badge.appendChild(info);
+    E.hostBadge.appendChild(badge);
+  }
+
+  // Игроки — лентой карточек снизу («места» как в SIGame).
   function renderPlayers() {
-    E.players.innerHTML = "<h3>Игроки</h3>";
+    E.players.innerHTML = "";
     if (!snap.players.length) {
-      E.players.appendChild(el("p", "Пока никого."));
+      E.players.appendChild(el("div", "Игроков пока нет."));
       return;
     }
     const cur = snap.current;
     for (const p of snap.players) {
-      const row = el("div", "");
-      row.className = "play-player";
-      if (you.id === p.id) row.classList.add("self");
-      if (snap.picker === p.id) row.classList.add("picker");
-      if (cur && cur.buzzed === p.id) row.classList.add("buzzed");
-      const tags = [];
-      if (snap.picker === p.id) tags.push("◆");
-      if (cur && cur.buzzed === p.id) tags.push("🔔");
-      if (!p.online) tags.push("⚪");
-      row.textContent = `${p.name}: ${p.score}${tags.length ? "  " + tags.join(" ") : ""}`;
-      E.players.appendChild(row);
+      const card = el("div", "");
+      card.className = "player-card";
+      if (you.id === p.id) card.classList.add("self");
+      if (snap.picker === p.id) card.classList.add("picker");
+      if (cur && cur.buzzed === p.id) card.classList.add("buzzed");
+      if (cur && (cur.locked_out || []).includes(p.id)) card.classList.add("locked");
+      if (!p.online) card.classList.add("offline");
+
+      card.appendChild(avatarEl(p.name, p.avatar, 64));
+
+      const nm = el("div", p.name);
+      nm.className = "player-card-name";
+      card.appendChild(nm);
+
+      const sc = el("div", String(p.score));
+      sc.className = "player-card-score";
+      card.appendChild(sc);
+
+      const tag = playerTag(p, cur);
+      if (tag) {
+        const t = el("div", tag);
+        t.className = "player-card-tag";
+        card.appendChild(t);
+      }
+
+      // Ведущий может вручную поправить счёт игрока (✎ в углу карточки).
+      if (you.host) {
+        const edit = ctrl("✎", () => startScoreEdit(card, p));
+        edit.className = "score-edit player-card-edit";
+        card.appendChild(edit);
+      }
+      E.players.appendChild(card);
     }
+  }
+
+  // Короткая подпись состояния игрока под счётом.
+  function playerTag(p, cur) {
+    if (cur && cur.buzzed === p.id) return "🔔 отвечает";
+    if (snap.picker === p.id) return "◆ выбирает";
+    if (cur && (cur.locked_out || []).includes(p.id)) return "уже отвечал";
+    if (!p.online) return "⚪ не в сети";
+    return "";
+  }
+
+  // Включить редактирование счёта игрока (ведущий).
+  function startScoreEdit(row, p) {
+    row.innerHTML = "";
+    const inp = document.createElement("input");
+    inp.type = "number";
+    inp.value = String(p.score);
+    inp.className = "score-edit-input";
+    const save = () => {
+      const v = parseInt(inp.value, 10);
+      if (!isNaN(v)) send({ type: "set_score", player: p.id, value: v });
+    };
+    inp.addEventListener("keydown", (e) => { if (e.key === "Enter") save(); });
+    row.appendChild(el("span", p.name + ": "));
+    row.appendChild(inp);
+    row.appendChild(ctrl("✓", save));
+    row.appendChild(ctrl("✕", () => render()));
+    inp.focus();
   }
 
   // ----------------------------- Экран игрока -----------------------------
@@ -188,7 +484,7 @@
 
     if (snap.phase === "lobby") {
       E.main.appendChild(bigState("Ожидание начала игры ведущим…"));
-      E.main.appendChild(settingsPanel(false));
+      E.main.appendChild(settingsButton(false));
       return;
     }
     if (snap.phase === "game_over") {
@@ -209,17 +505,31 @@
     }
 
     if (cur) {
+      const s = currentSettings();
+      if (snap.phase === "question" && cur.buzzing_open) E.main.appendChild(timeBar(s.buzz_time_secs));
+      if (snap.phase === "answering") E.main.appendChild(timeBar(s.answer_time_secs));
       E.main.appendChild(questionBlock(cur));
       if (snap.phase === "question") {
         const locked = (cur.locked_out || []).includes(you.id);
+        const blocked = (cur.false_started || []).includes(you.id);
         const buzz = document.createElement("button");
         buzz.className = "buzz";
         if (locked) {
           buzz.textContent = "Вы уже отвечали на этот вопрос";
           buzz.disabled = true;
-        } else {
+        } else if (blocked) {
+          buzz.textContent = "Фальстарт! Подождите…";
+          buzz.disabled = true;
+        } else if (cur.buzzing_open) {
           buzz.textContent = "ОТВЕТИТЬ";
           buzz.addEventListener("click", () => send({ type: "buzz" }));
+        } else if (s.false_start) {
+          buzz.textContent = "ОТВЕТИТЬ (рано — риск фальстарта!)";
+          buzz.classList.add("early");
+          buzz.addEventListener("click", () => send({ type: "buzz" }));
+        } else {
+          buzz.textContent = "Ждите сигнала ведущего…";
+          buzz.disabled = true;
         }
         E.main.appendChild(buzz);
       } else if (snap.phase === "answering") {
@@ -230,6 +540,8 @@
               : `Отвечает: ${nameOf(cur.buzzed)}`
           )
         );
+      } else if (snap.phase === "show_answer") {
+        E.main.appendChild(bigState("Ведущий показывает ответ…"));
       }
       return;
     }
@@ -254,7 +566,7 @@
 
     if (snap.phase === "lobby") {
       E.main.appendChild(bigState("Игроки собираются. Когда все готовы — «Начать игру»."));
-      E.main.appendChild(settingsPanel(true));
+      E.main.appendChild(settingsButton(true));
       return;
     }
     if (snap.phase === "game_over") {
@@ -271,6 +583,9 @@
     }
 
     if (cur) {
+      const s = currentSettings();
+      if (snap.phase === "question" && cur.buzzing_open) E.main.appendChild(timeBar(s.buzz_time_secs));
+      if (snap.phase === "answering") E.main.appendChild(timeBar(s.answer_time_secs));
       E.main.appendChild(questionBlock(cur));
       if (cur.answer != null) {
         const a = el("div", `Правильный ответ: ${cur.answer}`);
@@ -281,7 +596,15 @@
         const extra = cur.solo ? ` (за ${cur.reward})` : "";
         E.main.appendChild(bigState(`Отвечает: ${nameOf(cur.buzzed)}${extra} — оцените ответ.`));
       } else if (snap.phase === "question") {
-        E.main.appendChild(bigState("Ждём, кто нажмёт кнопку…"));
+        E.main.appendChild(
+          bigState(
+            cur.buzzing_open
+              ? "Кнопки открыты — ждём, кто нажмёт…"
+              : "Листайте слайды и нажмите «Открыть кнопки», когда готовы."
+          )
+        );
+      } else if (snap.phase === "show_answer") {
+        E.main.appendChild(bigState("Показываете ответ. «Закрыть вопрос», когда закончите."));
       }
       return;
     }
@@ -299,6 +622,18 @@
     E.controls.innerHTML = "";
     if (!you.host) return; // управление ходом — у ведущего
 
+    const cur = snap.current;
+    // Кнопки листания слайдов (вопрос/ответ).
+    const slideNav = () => {
+      if (!cur) return;
+      const atFirst = cur.slide <= 0;
+      const atLast = cur.slide >= cur.slide_count - 1;
+      E.controls.appendChild(ctrl("◀ Назад", () => send({ type: "prev_slide" }), atFirst));
+      E.controls.appendChild(
+        ctrl(`Далее ▶  (${cur.slide + 1}/${cur.slide_count})`, () => send({ type: "next_slide" }), atLast)
+      );
+    };
+
     switch (snap.phase) {
       case "lobby":
         E.controls.appendChild(
@@ -306,14 +641,31 @@
         );
         break;
       case "question":
+        slideNav();
+        if (cur && !cur.buzzing_open) {
+          E.controls.appendChild(ctrl("🔔 Открыть кнопки", () => send({ type: "open_buzz" })));
+        }
         E.controls.appendChild(ctrl("Показать ответ (никто не нажал)", () => send({ type: "reveal" })));
+        E.controls.appendChild(ctrl("Пропустить", () => send({ type: "skip_question" }), false, "danger"));
         break;
       case "answering":
         E.controls.appendChild(ctrl("Верно", () => send({ type: "judge", correct: true })));
         E.controls.appendChild(ctrl("Неверно", () => send({ type: "judge", correct: false }), false, "danger"));
+        E.controls.appendChild(ctrl("Пропустить", () => send({ type: "skip_question" })));
+        break;
+      case "show_answer":
+        slideNav();
+        E.controls.appendChild(ctrl("Закрыть вопрос ▶", () => send({ type: "close_question" })));
         break;
       case "round_over":
         E.controls.appendChild(ctrl("Следующий раунд", () => send({ type: "next_round" })));
+        break;
+      case "game_over":
+        // Если партию хостим мы — можно тут же поднять новую, выбрав любой пак.
+        if (weHostServer) {
+          E.controls.appendChild(ctrl("🎮 Новая игра — выбрать пак", () => hostOwnPack()));
+          E.controls.appendChild(ctrl("▶ Новая игра — демо-пак", () => hostDemo()));
+        }
         break;
       case "final_reveal":
         E.controls.appendChild(ctrl("Верно", () => send({ type: "final_judge", correct: true })));
@@ -452,26 +804,36 @@
   }
 
   function betForm() {
-    const wrap = el("div", "");
-    wrap.className = "final-form";
     const me = snap.players.find((p) => p.id === you.id);
     const max = me ? me.score : 1;
+
+    const box = el("div", "");
+
+    const hint = el("div", `Ставка: от 1 до ${max} очков`);
+    hint.className = "final-form-hint";
+    box.appendChild(hint);
+
+    const wrap = el("div", "");
+    wrap.className = "final-form";
     const inp = document.createElement("input");
     inp.type = "number";
     inp.min = "1";
     inp.max = String(max);
     inp.value = "1";
-    const b = ctrl(`Поставить (1..${max})`, () => {
-      const v = parseInt(inp.value, 10);
-      if (!(v >= 1 && v <= max)) {
-        setStatus(`Ставка должна быть от 1 до ${max}.`);
-        return;
-      }
-      send({ type: "final_bet", amount: v });
-    });
     wrap.appendChild(inp);
-    wrap.appendChild(b);
-    return wrap;
+    wrap.appendChild(
+      ctrl("Сделать ставку", () => {
+        const v = parseInt(inp.value, 10);
+        if (!(v >= 1 && v <= max)) {
+          setStatus(`Ставка должна быть от 1 до ${max}.`);
+          return;
+        }
+        send({ type: "final_bet", amount: v });
+      })
+    );
+    wrap.appendChild(ctrl(`Ва-банк (${max})`, () => send({ type: "final_bet", amount: max }), max < 1));
+    box.appendChild(wrap);
+    return box;
   }
 
   function answerForm() {
@@ -501,43 +863,111 @@
 
   // ----------------------------- Настройки партии -----------------------------
 
-  // Панель настроек в лобби. editable=true только у ведущего.
-  function settingsPanel(editable) {
-    const s = snap.settings || { cat_must_give: true, no_risk_double: false };
-    const box = el("div", "");
-    box.className = "play-settings";
-    box.appendChild(el("h3", "Настройки партии" + (editable ? "" : " (задаёт ведущий)")));
+  // Кнопка открытия меню настроек (в лобби).
+  function settingsButton(editable) {
+    return ctrl(editable ? "⚙ Настройки партии" : "⚙ Посмотреть настройки", () => {
+      settingsOpen = true;
+      render();
+    });
+  }
 
-    const mk = (key, labelText, hint) => {
+  // Оверлей-меню настроек. editable=true только у ведущего.
+  function settingsOverlay(editable) {
+    const s = currentSettings();
+    const overlay = el("div", "");
+    overlay.id = "settings-overlay";
+    overlay.className = "settings-overlay";
+    const panel = el("div", "");
+    panel.className = "settings-panel";
+    overlay.appendChild(panel);
+
+    const head = el("div", "");
+    head.className = "settings-head";
+    head.appendChild(el("h2", "Настройки партии" + (editable ? "" : " (только просмотр)")));
+    head.appendChild(ctrl("✕", () => { settingsOpen = false; render(); }));
+    panel.appendChild(head);
+
+    // Чекбокс с подсказкой.
+    const checkbox = (key, labelText, hint) => {
       const row = el("label", "");
       row.className = "play-setting";
       const cb = document.createElement("input");
       cb.type = "checkbox";
       cb.checked = !!s[key];
       cb.disabled = !editable;
-      if (editable) {
-        cb.addEventListener("change", () => {
-          send({
-            type: "settings",
-            cat_must_give: key === "cat_must_give" ? cb.checked : s.cat_must_give,
-            no_risk_double: key === "no_risk_double" ? cb.checked : s.no_risk_double,
-          });
-        });
-      }
+      if (editable) cb.addEventListener("change", () => sendSettings({ [key]: cb.checked }));
       row.appendChild(cb);
       row.appendChild(document.createTextNode(" " + labelText));
-      box.appendChild(row);
+      panel.appendChild(row);
       if (hint) {
         const h = el("div", hint);
         h.className = "play-setting-hint";
-        box.appendChild(h);
+        panel.appendChild(h);
       }
     };
-    mk("cat_must_give", "Кот в мешке: обязательно отдавать другому игроку",
-       "Выключено — выбравший может оставить кота себе.");
-    mk("no_risk_double", "Вопрос без риска: удвоенная награда",
-       "Выключено — обычная награда (номинал).");
-    return box;
+
+    // Числовое поле настройки.
+    const number = (key, labelText, min, max, hint) => {
+      const row = el("label", "");
+      row.className = "play-setting";
+      row.appendChild(document.createTextNode(labelText + " "));
+      const inp = document.createElement("input");
+      inp.type = "number";
+      inp.min = String(min);
+      inp.max = String(max);
+      inp.value = String(s[key]);
+      inp.disabled = !editable;
+      inp.className = "settings-num";
+      if (editable) {
+        inp.addEventListener("change", () => {
+          let v = parseInt(inp.value, 10);
+          if (isNaN(v)) v = min;
+          v = Math.max(min, Math.min(max, v));
+          inp.value = String(v);
+          sendSettings({ [key]: v });
+        });
+      }
+      row.appendChild(inp);
+      panel.appendChild(row);
+      if (hint) {
+        const h = el("div", hint);
+        h.className = "play-setting-hint";
+        panel.appendChild(h);
+      }
+    };
+
+    // Режим открытия кнопок (select).
+    panel.appendChild(el("h3", "Кнопки и ответ"));
+    const modeRow = el("label", "");
+    modeRow.className = "play-setting";
+    modeRow.appendChild(document.createTextNode("Открытие кнопок: "));
+    const sel = document.createElement("select");
+    sel.disabled = !editable;
+    for (const [val, txt] of [["manual", "Вручную ведущим"], ["after_last_slide", "Автоматически на последнем слайде"]]) {
+      const o = document.createElement("option");
+      o.value = val;
+      o.textContent = txt;
+      if (s.buzz_mode === val) o.selected = true;
+      sel.appendChild(o);
+    }
+    if (editable) sel.addEventListener("change", () => sendSettings({ buzz_mode: sel.value }));
+    modeRow.appendChild(sel);
+    panel.appendChild(modeRow);
+
+    checkbox("false_start", "Фальстарт: нажатие до открытия кнопок блокирует игрока",
+      "Выключено — до открытия кнопка просто неактивна.");
+    number("false_start_block_secs", "Длительность блока за фальстарт (сек):", 1, 60);
+    number("buzz_time_secs", "Время на нажатие (сек):", 1, 120,
+      "Используется для бегущей полосы времени.");
+    number("answer_time_secs", "Время на ответ (сек):", 1, 300);
+
+    panel.appendChild(el("h3", "Особые вопросы"));
+    checkbox("cat_must_give", "Кот в мешке: обязательно отдавать другому игроку",
+      "Выключено — выбравший может оставить кота себе.");
+    checkbox("no_risk_double", "Вопрос без риска: удвоенная награда",
+      "Выключено — обычная награда (номинал).");
+
+    return overlay;
   }
 
   // ----------------------------- Аукцион -----------------------------
@@ -566,6 +996,13 @@
     const me = snap.players.find((p) => p.id === you.id);
     const myScore = me ? me.score : 0;
     const min = a.opening ? a.price : a.high_bid + 1;
+
+    const box = el("div", "");
+
+    const hint = el("div", `Ставка: от ${min} до ${myScore} очков`);
+    hint.className = "final-form-hint";
+    box.appendChild(hint);
+
     const wrap = el("div", "");
     wrap.className = "final-form";
 
@@ -577,7 +1014,7 @@
     wrap.appendChild(inp);
 
     wrap.appendChild(
-      ctrl(`Ставка (${min}…${myScore})`, () => {
+      ctrl("Поднять ставку", () => {
         const v = parseInt(inp.value, 10);
         if (!(v >= min && v <= myScore)) {
           setStatus(`Ставка должна быть от ${min} до ${myScore}.`);
@@ -590,7 +1027,8 @@
     if (!a.opening) {
       wrap.appendChild(ctrl("Пас", () => send({ type: "pass" }), false, "danger"));
     }
-    return wrap;
+    box.appendChild(wrap);
+    return box;
   }
 
   // ----------------------------- Кот в мешке -----------------------------
@@ -664,16 +1102,19 @@
     return table;
   }
 
-  // Блок вопроса (без правильного ответа).
+  // Блок текущего слайда (вопроса или ответа).
   function questionBlock(cur) {
     const box = el("div", "");
     box.className = "play-question";
+    const showingAnswer = snap.phase === "show_answer";
     if (cur.kind && cur.kind !== "normal" && KIND[cur.kind]) {
       const badge = el("div", KIND[cur.kind]);
       badge.className = "play-kind-badge";
       box.appendChild(badge);
     }
-    box.appendChild(el("h3", `Вопрос за ${cur.price}`));
+    const title = showingAnswer ? "Ответ" : `Вопрос за ${cur.price}`;
+    const slideTag = cur.slide_count > 1 ? `  · слайд ${cur.slide + 1}/${cur.slide_count}` : "";
+    box.appendChild(el("h3", title + slideTag));
     for (const item of cur.content) {
       if (item.type === "text") {
         box.appendChild(el("p", item.value));

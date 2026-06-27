@@ -11,16 +11,30 @@ use sigame_core::{Content, PlayerId};
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ClientMsg {
-    /// Первое сообщение после подключения: имя и роль.
+    /// Первое сообщение после подключения: имя, роль и (необязательно) аватарка
+    /// — компактный data-URL картинки, уменьшенной клиентом.
     Hello {
         name: String,
         #[serde(default)]
         host: bool,
+        #[serde(default)]
+        avatar: Option<String>,
+    },
+    /// Сменить свою аватарку (в лобби). `null` — убрать (вернуть заглушку).
+    SetAvatar {
+        #[serde(default)]
+        avatar: Option<String>,
     },
     /// Изменить настройки партии в лобби (только ведущий).
     Settings {
         cat_must_give: bool,
         no_risk_double: bool,
+        /// Режим открытия кнопок: `"manual"` или `"after_last_slide"`.
+        buzz_mode: String,
+        false_start: bool,
+        false_start_block_secs: u32,
+        buzz_time_secs: u32,
+        answer_time_secs: u32,
     },
     /// Начать игру (только ведущий).
     Start,
@@ -28,6 +42,18 @@ pub enum ClientMsg {
     Pick { theme: usize, question: usize },
     /// Нажать кнопку (игрок).
     Buzz,
+    /// Открыть приём нажатий (только ведущий; режим `manual` или досрочно).
+    OpenBuzz,
+    /// Листать слайды вопроса/ответа вперёд (только ведущий).
+    NextSlide,
+    /// Листать слайды назад (только ведущий).
+    PrevSlide,
+    /// Закрыть вопрос после показа слайдов ответа (только ведущий).
+    CloseQuestion,
+    /// Пропустить текущий вопрос без начисления очков (только ведущий).
+    SkipQuestion,
+    /// Ручная правка счёта игрока (только ведущий).
+    SetScore { player: PlayerId, value: i64 },
     /// Аукцион: повысить ставку (игрок, чей ход).
     Bid { amount: i64 },
     /// Аукцион: ва-банк — весь свой счёт (игрок, чей ход).
@@ -89,6 +115,16 @@ pub struct Snapshot {
     pub auction: Option<AuctionView>,
     /// Настройки правил партии (видны всем, меняет ведущий в лобби).
     pub settings: SettingsView,
+    /// Ведущий партии (имя и аватарка), если он подключён.
+    pub host: Option<HostView>,
+}
+
+/// Ведущий в снимке (он не игрок, поэтому отдельно).
+#[derive(Debug, Serialize)]
+pub struct HostView {
+    pub name: String,
+    pub avatar: Option<String>,
+    pub online: bool,
 }
 
 /// Настройки правил партии в снимке.
@@ -96,6 +132,12 @@ pub struct Snapshot {
 pub struct SettingsView {
     pub cat_must_give: bool,
     pub no_risk_double: bool,
+    /// Режим открытия кнопок: `"manual"` или `"after_last_slide"`.
+    pub buzz_mode: String,
+    pub false_start: bool,
+    pub false_start_block_secs: u32,
+    pub buzz_time_secs: u32,
+    pub answer_time_secs: u32,
 }
 
 /// Снимок текущих торгов на аукционе.
@@ -161,6 +203,8 @@ pub struct PlayerView {
     pub name: String,
     pub score: i64,
     pub online: bool,
+    /// Аватарка игрока (data-URL) или `null` — тогда клиент рисует заглушку.
+    pub avatar: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -188,10 +232,19 @@ pub struct CurrentView {
     pub solo: bool,
     /// Сколько начислят за верный ответ (для аукциона — выигравшая ставка).
     pub reward: i64,
+    /// Блоки текущего слайда (вопроса — в `question`/`answering`, ответа — в
+    /// `show_answer`). Показываются одновременно.
     pub content: Vec<Content>,
+    /// Индекс текущего слайда и общее число слайдов активного списка.
+    pub slide: usize,
+    pub slide_count: usize,
+    /// Открыт ли приём нажатий прямо сейчас.
+    pub buzzing_open: bool,
     pub buzzed: Option<PlayerId>,
     /// Игроки, уже ошибшиеся на этом вопросе (им нельзя жать кнопку снова).
     pub locked_out: Vec<PlayerId>,
+    /// Игроки, временно заблокированные за фальстарт.
+    pub false_started: Vec<PlayerId>,
     /// Правильный ответ — заполняется только в снимке для ведущего.
     pub answer: Option<String>,
 }

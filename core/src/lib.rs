@@ -16,10 +16,10 @@ pub mod pack;
 pub use archive::PackArchive;
 pub use error::{PackError, Result};
 pub use game::{
-    AuctionState, CurrentQuestion, FinalState, Game, GameConfig, GameError, GameSettings, Phase,
-    Player, PlayerId,
+    AuctionState, BuzzMode, CurrentQuestion, FinalState, Game, GameConfig, GameError, GameSettings,
+    Phase, Player, PlayerId,
 };
-pub use pack::{Content, Pack, Question, QuestionKind, Round, Theme};
+pub use pack::{Content, Pack, Question, QuestionKind, Round, Slide, Theme};
 
 /// Версия формата паков `.sgpack`. Пишется в `pack.json` для будущей совместимости.
 pub const PACK_FORMAT_VERSION: u32 = 1;

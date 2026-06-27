@@ -15,8 +15,10 @@ use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Write};
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
-use tauri::{AppHandle, Emitter, State};
+use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+use tauri::{AppHandle, Emitter, Manager, State};
 
 /// Папка, куда распаковываются медиа открытого пака и откуда их отдаёт HTTP-сервер.
 fn media_dir() -> PathBuf {
@@ -45,6 +47,47 @@ fn demo_pack_path() -> Result<String, String> {
 #[tauri::command]
 fn media_base_url(server: State<MediaServer>) -> String {
     format!("http://127.0.0.1:{}/", server.port)
+}
+
+/// Прочитать картинку с диска и вернуть её как data-URL (`data:image/...;base64,…`).
+/// Фронтенд уже уменьшает её в `<canvas>`, но саму загрузку файла делаем здесь,
+/// потому что у WebView нет прямого доступа к произвольным путям.
+#[tauri::command]
+fn read_image_data_url(path: String) -> Result<String, String> {
+    let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
+    // Защита от гигантских файлов (всё равно уменьшаем на клиенте).
+    if bytes.len() > 20 * 1024 * 1024 {
+        return Err("файл слишком большой (более 20 МБ)".into());
+    }
+    let ext = Path::new(&path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let mime = match ext.as_str() {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "webp" => "image/webp",
+        "gif" => "image/gif",
+        _ => return Err("поддерживаются PNG, JPG, WEBP, GIF".into()),
+    };
+    Ok(format!("data:{mime};base64,{}", base64_encode(&bytes)))
+}
+
+/// Кодирование в стандартный base64 без внешних зависимостей.
+fn base64_encode(data: &[u8]) -> String {
+    const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity((data.len() + 2) / 3 * 4);
+    for chunk in data.chunks(3) {
+        let b0 = chunk[0] as usize;
+        let b1 = *chunk.get(1).unwrap_or(&0) as usize;
+        let b2 = *chunk.get(2).unwrap_or(&0) as usize;
+        out.push(T[b0 >> 2] as char);
+        out.push(T[((b0 & 0b11) << 4) | (b1 >> 4)] as char);
+        out.push(if chunk.len() > 1 { T[((b1 & 0b1111) << 2) | (b2 >> 6)] as char } else { '=' });
+        out.push(if chunk.len() > 2 { T[b2 & 0b111111] as char } else { '=' });
+    }
+    out
 }
 
 /// Загрузить `.sgpack`: распарсить, проверить медиа, распаковать их в [`media_dir`]
@@ -177,8 +220,14 @@ fn unique_media_name(media: &BTreeMap<String, Vec<u8>>, base: &str, bytes: &[u8]
 // него строки JSON и пересылает их фронтенду как события Tauri, а команды от
 // фронтенда пишет в сокет. Вся игровая логика интерфейса остаётся в JS.
 
-/// Открытое сетевое подключение (поток для записи команд серверу).
-struct NetState(Mutex<Option<TcpStream>>);
+/// Открытое сетевое подключение. `generation` растёт при каждом новом подключении
+/// и при намеренном отключении; поток-читатель шлёт `net:closed` только если его
+/// поколение всё ещё актуально. Так «эхо» закрытия старого соединения не мешает
+/// уже начатой новой партии (иначе оно глушило бы только что поднятый сервер).
+struct NetState {
+    stream: Mutex<Option<TcpStream>>,
+    generation: Arc<AtomicU64>,
+}
 
 /// Подключиться к серверу, представиться (`hello`) и начать слушать сообщения.
 #[tauri::command]
@@ -189,14 +238,21 @@ fn net_connect(
     port: u16,
     name: String,
     is_host: bool,
+    avatar: Option<String>,
 ) -> Result<(), String> {
+    // Новое подключение инвалидирует прежнее: его поток-читатель уже не пришлёт
+    // ложное "net:closed".
+    let gen = state.generation.clone();
+    let my_gen = gen.fetch_add(1, Ordering::SeqCst) + 1;
+
     let stream = TcpStream::connect((host.as_str(), port)).map_err(|e| e.to_string())?;
     stream.set_nodelay(true).ok();
     let write = stream.try_clone().map_err(|e| e.to_string())?;
-    *state.0.lock().unwrap() = Some(write);
+    *state.stream.lock().unwrap() = Some(write);
 
     // Представляемся серверу.
-    let hello = serde_json::json!({ "type": "hello", "name": name, "host": is_host });
+    let hello =
+        serde_json::json!({ "type": "hello", "name": name, "host": is_host, "avatar": avatar });
     net_write(&state, &hello.to_string())?;
 
     // Поток чтения: каждую строку из сокета шлём фронтенду событием "net:message".
@@ -211,7 +267,10 @@ fn net_connect(
                 Err(_) => break,
             }
         }
-        let _ = app.emit("net:closed", ());
+        // Сообщаем о закрытии, только если это всё ещё актуальное соединение.
+        if gen.load(Ordering::SeqCst) == my_gen {
+            let _ = app.emit("net:closed", ());
+        }
     });
 
     Ok(())
@@ -223,20 +282,87 @@ fn net_send(state: State<NetState>, line: String) -> Result<(), String> {
     net_write(&state, &line)
 }
 
-/// Закрыть подключение.
+/// Закрыть подключение. Поднимаем поколение, чтобы поток-читатель закрываемого
+/// сокета не прислал "net:closed" уже для следующей партии.
 #[tauri::command]
 fn net_disconnect(state: State<NetState>) {
-    if let Some(stream) = state.0.lock().unwrap().take() {
+    state.generation.fetch_add(1, Ordering::SeqCst);
+    if let Some(stream) = state.stream.lock().unwrap().take() {
         let _ = stream.shutdown(std::net::Shutdown::Both);
     }
 }
 
 fn net_write(state: &State<NetState>, line: &str) -> Result<(), String> {
-    let mut guard = state.0.lock().unwrap();
+    let mut guard = state.stream.lock().unwrap();
     let stream = guard.as_mut().ok_or("нет подключения к серверу")?;
     stream.write_all(line.as_bytes()).map_err(|e| e.to_string())?;
     stream.write_all(b"\n").map_err(|e| e.to_string())?;
     Ok(())
+}
+
+// ----------------------------- Локальный хостинг партии -----------------------------
+//
+// Чтобы можно было играть на ЛЮБОМ паке (а не только на заранее поднятом сервере),
+// клиент умеет сам запустить `sigame-server` дочерним процессом с выбранным паком,
+// а затем подключиться к нему ведущим. Дескриптор процесса храним, чтобы корректно
+// остановить сервер при отключении или закрытии приложения.
+
+/// Запущенный нами сервер партии (если хостим локально).
+struct HostState(Mutex<Option<Child>>);
+
+/// Путь к бинарю `sigame-server`. Сначала ищем рядом с клиентом
+/// (dev: `target/debug`; bundle: та же папка), иначе полагаемся на PATH
+/// (системная установка, .deb в `/usr/bin`).
+fn server_binary() -> PathBuf {
+    let name = if cfg!(windows) { "sigame-server.exe" } else { "sigame-server" };
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            let candidate = dir.join(name);
+            if candidate.exists() {
+                return candidate;
+            }
+        }
+    }
+    PathBuf::from(name) // поиск через PATH
+}
+
+/// Останавливает ранее запущенный нами сервер (если был).
+fn kill_host(state: &HostState) {
+    if let Some(mut child) = state.0.lock().unwrap().take() {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+}
+
+/// Запустить локальный сервер партии на выбранном паке.
+#[tauri::command]
+fn host_start(state: State<HostState>, pack_path: String, port: u16) -> Result<(), String> {
+    // Прежний сервер (если был) останавливаем.
+    kill_host(&state);
+
+    if !Path::new(&pack_path).exists() {
+        return Err(format!("файл пака не найден: {pack_path}"));
+    }
+    let bin = server_binary();
+
+    let child = Command::new(&bin)
+        .arg(&pack_path)
+        .arg("--port")
+        .arg(port.to_string())
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|e| format!("не удалось запустить сервер ({}): {e}", bin.display()))?;
+
+    *state.0.lock().unwrap() = Some(child);
+    Ok(())
+}
+
+/// Остановить локальный сервер партии.
+#[tauri::command]
+fn host_stop(state: State<HostState>) {
+    kill_host(&state);
 }
 
 // ----------------------------- HTTP медиа-сервер -----------------------------
@@ -392,14 +518,19 @@ fn hex_val(b: u8) -> Option<u8> {
 fn main() {
     let port = start_media_server().expect("не удалось запустить медиа-сервер");
 
-    tauri::Builder::default()
+    let app = tauri::Builder::default()
         .manage(MediaServer { port })
         .manage(EditorState(Mutex::new(PackArchive::new(Pack::new("")))))
-        .manage(NetState(Mutex::new(None)))
+        .manage(NetState {
+            stream: Mutex::new(None),
+            generation: Arc::new(AtomicU64::new(0)),
+        })
+        .manage(HostState(Mutex::new(None)))
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
             demo_pack_path,
             media_base_url,
+            read_image_data_url,
             open_pack,
             editor_new,
             editor_load,
@@ -407,8 +538,20 @@ fn main() {
             editor_save,
             net_connect,
             net_send,
-            net_disconnect
+            net_disconnect,
+            host_start,
+            host_stop
         ])
-        .run(tauri::generate_context!())
+        .build(tauri::generate_context!())
         .expect("ошибка при запуске Tauri-приложения");
+
+    // При выходе глушим локальный сервер партии, чтобы не оставлять «осиротевший»
+    // процесс, держащий порт.
+    app.run(|handle, event| {
+        if let tauri::RunEvent::ExitRequested { .. } = event {
+            if let Some(state) = handle.try_state::<HostState>() {
+                kill_host(state.inner());
+            }
+        }
+    });
 }

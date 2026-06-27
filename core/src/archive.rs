@@ -125,22 +125,22 @@ mod tests {
                 themes: vec![Theme {
                     name: "История".into(),
                     questions: vec![
-                        Question {
-                            price: 100,
-                            kind: crate::QuestionKind::Normal,
-                            content: vec![Content::Text {
+                        Question::simple(
+                            100,
+                            crate::QuestionKind::Normal,
+                            vec![Content::Text {
                                 value: "Текстовый вопрос?".into(),
                             }],
-                            answer: "Ответ".into(),
-                        },
-                        Question {
-                            price: 200,
-                            kind: crate::QuestionKind::Normal,
-                            content: vec![Content::Image {
+                            "Ответ",
+                        ),
+                        Question::simple(
+                            200,
+                            crate::QuestionKind::Normal,
+                            vec![Content::Image {
                                 value: "img1.jpg".into(),
                             }],
-                            answer: "Картинка".into(),
-                        },
+                            "Картинка",
+                        ),
                     ],
                 }],
             }],

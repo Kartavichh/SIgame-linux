@@ -70,6 +70,9 @@ fn main() {
     // Поток приёма консольных команд.
     spawn_console(hub.clone());
 
+    // Поток-таймер: снимает истёкшие блоки фальстарта и рассылает снимок.
+    spawn_timer(hub.clone());
+
     // Основной цикл приёма подключений: по потоку на клиента.
     let conn_ids = AtomicU64::new(1);
     for stream in listener.incoming() {
@@ -117,13 +120,13 @@ fn handle_conn(conn: ConnId, stream: TcpStream, hub: SharedHub, media_port: u16)
 
         // Первое сообщение обязано быть Hello.
         match (joined, msg) {
-            (false, ClientMsg::Hello { name, host }) => {
+            (false, ClientMsg::Hello { name, host, avatar }) => {
                 let w = match write.try_clone() {
                     Ok(w) => w,
                     Err(_) => break,
                 };
                 let mut h = hub.lock().unwrap();
-                match h.join(conn, name, host, w) {
+                match h.join(conn, name, host, avatar, w) {
                     Ok((id, is_host)) => {
                         joined = true;
                         h.send_to(conn, &ServerMsg::Welcome { id, host: is_host, media_port });
@@ -171,6 +174,17 @@ fn send_direct(stream: &TcpStream, msg: &ServerMsg) {
         let mut w = stream;
         let _ = writeln!(w, "{s}");
     }
+}
+
+/// Фоновый таймер: периодически снимает истёкшие блоки фальстарта.
+fn spawn_timer(hub: SharedHub) {
+    std::thread::spawn(move || loop {
+        std::thread::sleep(std::time::Duration::from_millis(250));
+        let mut h = hub.lock().unwrap();
+        if h.clear_expired_false_starts() {
+            h.broadcast();
+        }
+    });
 }
 
 /// Поток чтения команд из stdin сервера.

@@ -152,6 +152,22 @@ button.small { padding: .3rem .6rem; font-size: .85rem; }
 .ed-media-tag { color: #ffd86b; font-size: .9rem; }
 .ed-preview { max-height: 80px; max-width: 160px; border-radius: .3rem; }
 .ed-tools { display: flex; gap: .5rem; }
+.ed-item-ctrls { display: flex; gap: .3rem; margin-left: auto; }
+
+/* Этап 10e: визуальный редактор слайдов */
+.ed-slides {
+  display: flex; flex-direction: column; gap: .5rem;
+  border-top: 1px solid #ffffff1a; padding-top: .6rem;
+}
+.ed-slides-title { color: #ffd86b; font-weight: 600; font-size: .95rem; }
+.ed-slide {
+  background: #ffffff0d; border: 1px solid #ffffff1a; border-radius: .4rem;
+  padding: .6rem; display: flex; flex-direction: column; gap: .5rem;
+}
+.ed-slide-head { display: flex; align-items: center; gap: .4rem; }
+.ed-slide-cap { color: #aab; font-size: .9rem; margin-right: auto; }
+.ed-item { align-items: flex-start; }
+button.small:disabled { opacity: .35; cursor: default; }
 
 /* Игровой режим (сеть) */
 #play-section input[type="text"] { min-width: 8rem; }
@@ -159,17 +175,59 @@ button.small { padding: .3rem .6rem; font-size: .85rem; }
   background: #ffffff14; border: 1px solid #ffffff33; color: #eef;
   border-radius: .4rem; padding: .5rem; width: 6rem;
 }
-.play-meta { padding: .5rem 1.5rem; font-size: 1.1rem; color: #ffd86b; }
-.play-cols { display: flex; gap: 1rem; padding: 0 1.5rem; align-items: flex-start; }
-.play-players {
-  min-width: 12rem; background: #ffffff0d; border-radius: .5rem; padding: 1rem;
+.host-hint { color: #99a; align-self: center; }
+/* Верхняя полоса: бейдж ведущего слева + строка состояния */
+.play-top {
+  display: flex; align-items: center; gap: 1rem;
+  padding: .6rem 1.5rem;
 }
-.play-players h3 { margin: 0 0 .5rem; }
-.play-player { padding: .3rem .4rem; border-radius: .3rem; }
-.play-player.self { background: #6cf09a22; font-weight: 600; }
-.play-player.picker { box-shadow: inset 0 0 0 1px #ffd86b66; }
-.play-player.buzzed { background: #b0304833; }
-.play-main { flex: 1; }
+.play-meta { font-size: 1.05rem; color: #ffd86b; }
+.host-badge {
+  display: flex; align-items: center; gap: .6rem;
+  background: #ffd86b14; border: 1px solid #ffd86b40; border-radius: .6rem;
+  padding: .4rem .8rem;
+}
+.host-badge.offline { opacity: .5; }
+.host-badge-info { display: flex; flex-direction: column; line-height: 1.2; }
+.host-badge-info > div:first-child { color: #aab; font-size: .8rem; }
+.host-badge-name { font-weight: 700; font-size: 1.15rem; }
+
+.play-main { padding: 0 1.5rem; }
+
+/* Игроки — лента «мест» внизу */
+.play-players {
+  display: flex; gap: .8rem; flex-wrap: wrap;
+  padding: 1rem 1.5rem 1.5rem;
+  border-top: 1px solid #ffffff14; margin-top: .5rem;
+}
+.player-card {
+  position: relative; width: 7.5rem;
+  display: flex; flex-direction: column; align-items: center; gap: .25rem;
+  background: #ffffff0d; border: 1px solid #ffffff1a; border-radius: .6rem;
+  padding: .7rem .4rem .5rem;
+  transition: box-shadow .1s, background .1s;
+}
+.player-card.self { border-color: #6cf09a; }
+.player-card.picker { box-shadow: 0 0 0 2px #ffd86b; }
+.player-card.buzzed { background: #b0304833; box-shadow: 0 0 0 2px #ff5c7a; }
+.player-card.locked { opacity: .65; }
+.player-card.offline { opacity: .45; }
+.player-card-name {
+  font-weight: 600; max-width: 100%;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.player-card-score { font-size: 1.4rem; font-weight: bold; color: #ffd86b; }
+.player-card-tag { font-size: .78rem; color: #cdd6ff; min-height: 1em; }
+.player-card-edit { position: absolute; top: .25rem; right: .25rem; }
+
+/* Аватарки */
+.avatar {
+  border-radius: 50%; object-fit: cover; flex: none;
+  display: inline-flex; align-items: center; justify-content: center;
+  border: 1px solid #ffffff33; overflow: hidden;
+}
+.avatar-fallback { color: #fff; font-weight: 700; line-height: 1; }
+.avatar-slot { display: inline-flex; align-items: center; }
 
 .play-myscore {
   font-size: 1.3rem; font-weight: bold; color: #6cf09a;
@@ -225,6 +283,7 @@ button.buzz:hover { background: #c83a55; }
 .final-theme.removed { text-decoration: line-through; opacity: .4; }
 .final-form { display: flex; gap: .5rem; align-items: center; margin: .8rem 0; }
 .final-form input[type="text"] { min-width: 14rem; }
+.final-form-hint { color: #cdd6ff; margin-bottom: .2rem; }
 .final-reveallist { display: flex; flex-direction: column; gap: .4rem; margin: 1rem 0; }
 .final-reveal-row {
   padding: .6rem .8rem; border-radius: .4rem; background: #ffffff0d; font-size: 1.1rem;
@@ -232,3 +291,42 @@ button.buzz:hover { background: #c83a55; }
 .final-reveal-row.current { background: #ffd86b22; box-shadow: inset 0 0 0 1px #ffd86b66; }
 .final-reveal-row.ok { background: #6cf09a18; }
 .final-reveal-row.bad { background: #b0304822; }
+
+/* Этап 10d: бегущая полоса времени */
+.time-bar {
+  height: .5rem; width: 100%; background: #ffffff14; border-radius: .25rem;
+  overflow: hidden; margin: .4rem 0;
+}
+.time-bar-fill {
+  height: 100%; width: 100%; background: #fff; border-radius: .25rem;
+  transform-origin: left center;
+  animation-name: time-bar-shrink; animation-timing-function: linear;
+  animation-fill-mode: forwards;
+}
+@keyframes time-bar-shrink { from { width: 100%; } to { width: 0%; } }
+
+/* Кнопка «рано нажать» (фальстарт включён) */
+button.buzz.early { background: #8a6d1f; }
+button.buzz.early:hover { background: #a8841f; }
+
+/* Правка счёта ведущим */
+.score-edit {
+  margin-left: auto; padding: .1rem .4rem; font-size: .9rem; background: #ffffff1a;
+}
+.score-edit-input { width: 6rem; }
+
+/* Оверлей меню настроек */
+.settings-overlay {
+  position: fixed; inset: 0; background: #000000aa; display: flex;
+  align-items: flex-start; justify-content: center; padding: 3rem 1rem; z-index: 50;
+  overflow: auto;
+}
+.settings-panel {
+  background: #1c1c28; border: 1px solid #ffffff22; border-radius: .6rem;
+  padding: 1.2rem 1.4rem; max-width: 40rem; width: 100%;
+}
+.settings-head { display: flex; align-items: center; justify-content: space-between; }
+.settings-head h2 { margin: 0; }
+.settings-panel h3 { margin: 1rem 0 .3rem; color: #ffd86b; font-size: 1.05rem; }
+.settings-num { width: 5rem; }
+.settings-panel select { padding: .2rem .4rem; }

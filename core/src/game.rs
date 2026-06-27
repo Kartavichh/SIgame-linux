@@ -40,8 +40,17 @@ impl Default for GameConfig {
     }
 }
 
-/// Настройки правил партии. Ведущий задаёт их в лобби до старта игры
-/// (по образцу настроек SIGame). Влияют на особые вопросы.
+/// Когда открывается приём нажатий на обычном вопросе.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BuzzMode {
+    /// Ведущий открывает кнопки вручную командой [`Game::open_buzz`].
+    Manual,
+    /// Кнопки открываются автоматически, когда показан последний слайд вопроса.
+    AfterLastSlide,
+}
+
+/// Настройки правил партии. Ведущий задаёт их в отдельном меню до старта игры
+/// (по образцу настроек SIGame).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GameSettings {
     /// «Кот в мешке»: `true` — выбравший обязан отдать вопрос другому игроку;
@@ -50,6 +59,17 @@ pub struct GameSettings {
     /// «Вопрос без риска»: `true` — награда удвоенная (`+2×номинал`);
     /// `false` — обычная (`+номинал`). Штрафа за ошибку нет в обоих случаях.
     pub no_risk_double: bool,
+    /// Режим открытия кнопок на обычном вопросе.
+    pub buzz_mode: BuzzMode,
+    /// Фальстарт: `true` — нажатие до открытия кнопок блокирует игрока на
+    /// `false_start_block_secs` секунд; `false` — до открытия кнопка неактивна.
+    pub false_start: bool,
+    /// Длительность блокировки за фальстарт (секунды; отсчитывает сервер).
+    pub false_start_block_secs: u32,
+    /// Сколько секунд ждать нажатия кнопки после открытия (для бегущей полосы).
+    pub buzz_time_secs: u32,
+    /// Сколько секунд даётся на ответ после нажатия.
+    pub answer_time_secs: u32,
 }
 
 impl Default for GameSettings {
@@ -57,6 +77,11 @@ impl Default for GameSettings {
         Self {
             cat_must_give: true,
             no_risk_double: false,
+            buzz_mode: BuzzMode::Manual,
+            false_start: false,
+            false_start_block_secs: 3,
+            buzz_time_secs: 5,
+            answer_time_secs: 20,
         }
     }
 }
@@ -77,6 +102,8 @@ pub enum Phase {
     /// Кто-то отвечает (нажал кнопку, выиграл аукцион, получил кота или вопрос
     /// без риска), ждём вердикта ведущего.
     Answering,
+    /// Вопрос разобран: ведущий листает слайды ответа, затем закрывает вопрос.
+    ShowAnswer,
     /// Все клетки раунда сыграны, ждём перехода к следующему раунду.
     RoundOver,
     /// Финал: игроки по очереди вычёркивают темы, пока не останется одна.
@@ -110,8 +137,14 @@ pub struct CurrentQuestion {
     pub buzzed: Option<PlayerId>,
     /// Игроки, уже ошибшиеся на этом вопросе (повторно нажать не могут).
     pub locked_out: HashSet<PlayerId>,
+    /// Игроки, временно заблокированные за фальстарт (нажали до открытия кнопок).
+    /// Сервер снимает блок через `false_start_block_secs` ([`Game::clear_false_start`]).
+    pub false_started: HashSet<PlayerId>,
     /// Открыт ли приём нажатий прямо сейчас.
     pub buzzing_open: bool,
+    /// Индекс текущего слайда: в фазах `Question`/`Answering` — в `question_slides`,
+    /// в фазе `ShowAnswer` — в `answer_slides`.
+    pub slide: usize,
 }
 
 /// Состояние торгов на аукционе.
@@ -165,6 +198,8 @@ pub enum GameError {
     BadBet,
     #[error("нельзя передать вопрос этому игроку")]
     InvalidTransfer,
+    #[error("фальстарт: нажатие до открытия кнопок")]
+    FalseStart,
 }
 
 /// Состояние финального раунда.
@@ -220,14 +255,22 @@ pub struct Game {
     current: Option<CurrentQuestion>,
     auction: Option<AuctionState>,
     finale: Option<FinalState>,
+    /// Кто станет выбирающим после показа слайдов ответа (фаза `ShowAnswer`).
+    pending_picker: Option<PlayerId>,
 }
 
 impl Game {
     /// Новая партия в фазе [`Phase::Lobby`].
     pub fn new(pack: Pack, config: GameConfig) -> Self {
+        // Таймеры из конфига переносим в настройки (их можно менять в меню).
+        let settings = GameSettings {
+            buzz_time_secs: config.buzz_time_secs,
+            answer_time_secs: config.answer_time_secs,
+            ..GameSettings::default()
+        };
         Self {
             config,
-            settings: GameSettings::default(),
+            settings,
             pack,
             players: Vec::new(),
             next_id: 1,
@@ -238,6 +281,7 @@ impl Game {
             current: None,
             auction: None,
             finale: None,
+            pending_picker: None,
         }
     }
 
@@ -324,8 +368,19 @@ impl Game {
         Ok(())
     }
 
-    /// Обычный вопрос: показываем, открываем гонку кнопок.
+    /// Обычный вопрос: показываем первый слайд. Кнопки открываются по режиму
+    /// `buzz_mode` (вручную ведущим либо автоматически на последнем слайде).
     fn start_normal(&mut self, theme: usize, question: usize, price: u32) {
+        let slides_len = self
+            .question_at(theme, question)
+            .map(|q| q.question_slides.len())
+            .unwrap_or(0);
+        // В авторежиме кнопки открыты сразу, если слайд вопроса всего один (он же
+        // последний); иначе откроются, когда ведущий долистает до последнего.
+        let buzzing_open = match self.settings.buzz_mode {
+            BuzzMode::Manual => false,
+            BuzzMode::AfterLastSlide => slides_len <= 1,
+        };
         self.current = Some(CurrentQuestion {
             theme,
             question,
@@ -336,7 +391,9 @@ impl Game {
             penalty: price as i64,
             buzzed: None,
             locked_out: HashSet::new(),
-            buzzing_open: true,
+            false_started: HashSet::new(),
+            buzzing_open,
+            slide: 0,
         });
         self.phase = Phase::Question;
     }
@@ -362,7 +419,9 @@ impl Game {
             penalty,
             buzzed: Some(answerer),
             locked_out: HashSet::new(),
+            false_started: HashSet::new(),
             buzzing_open: false,
+            slide: 0,
         });
         self.phase = Phase::Answering;
     }
@@ -392,7 +451,9 @@ impl Game {
             penalty: price as i64,
             buzzed: None, // получателя выберут командой give
             locked_out: HashSet::new(),
+            false_started: HashSet::new(),
             buzzing_open: false,
+            slide: 0,
         });
         self.phase = Phase::CatGive;
     }
@@ -561,11 +622,17 @@ impl Game {
                 let bid = a.high_bid;
                 self.start_solo(a.theme, a.question, a.price, QuestionKind::Auction, winner, bid, bid);
             }
-            None => self.finish_question(None),
+            None => self.end_question(None),
         }
     }
 
     /// Нажать кнопку. Первый успешный вызов получает право ответа.
+    ///
+    /// Если кнопки ещё не открыты:
+    /// - при включённом фальстарте игрок блокируется на этом вопросе до снятия
+    ///   блока сервером ([`Game::clear_false_start`]) и возвращается
+    ///   [`GameError::FalseStart`];
+    /// - при выключенном — нажатие просто отклоняется ([`GameError::WrongPhase`]).
     pub fn buzz(&mut self, player: PlayerId) -> Result<(), GameError> {
         if self.phase != Phase::Question {
             return Err(GameError::WrongPhase);
@@ -573,17 +640,137 @@ impl Game {
         if !self.has_player(player) {
             return Err(GameError::NoSuchPlayer);
         }
+        let false_start = self.settings.false_start;
         let cur = self.current.as_mut().expect("в фазе Question есть вопрос");
-        if !cur.buzzing_open {
-            return Err(GameError::WrongPhase);
-        }
-        if cur.locked_out.contains(&player) {
+        if cur.locked_out.contains(&player) || cur.false_started.contains(&player) {
             return Err(GameError::LockedOut);
+        }
+        if !cur.buzzing_open {
+            if false_start {
+                cur.false_started.insert(player);
+                return Err(GameError::FalseStart);
+            }
+            return Err(GameError::WrongPhase);
         }
         cur.buzzed = Some(player);
         cur.buzzing_open = false;
         self.phase = Phase::Answering;
         Ok(())
+    }
+
+    /// Снять блокировку фальстарта с игрока (сервер вызывает по истечении
+    /// `false_start_block_secs`). После этого игрок снова может нажать.
+    pub fn clear_false_start(&mut self, player: PlayerId) {
+        if let Some(cur) = self.current.as_mut() {
+            cur.false_started.remove(&player);
+        }
+    }
+
+    /// Ведущий вручную открывает приём нажатий (режим `Manual` или досрочно).
+    pub fn open_buzz(&mut self) -> Result<(), GameError> {
+        if self.phase != Phase::Question {
+            return Err(GameError::WrongPhase);
+        }
+        self.current
+            .as_mut()
+            .expect("в фазе Question есть вопрос")
+            .buzzing_open = true;
+        Ok(())
+    }
+
+    /// Ведущий листает слайды вперёд (вопроса — в `Question`/`Answering`,
+    /// ответа — в `ShowAnswer`). На последнем слайде вопроса в режиме
+    /// `AfterLastSlide` автоматически открывает кнопки.
+    pub fn next_slide(&mut self) -> Result<(), GameError> {
+        let slides_len = self.active_slides_len()?;
+        let show_answer = self.phase == Phase::ShowAnswer;
+        let auto = self.phase == Phase::Question
+            && self.settings.buzz_mode == BuzzMode::AfterLastSlide;
+        let cur = self.current.as_mut().expect("есть открытый вопрос");
+        if slides_len > 0 && cur.slide + 1 < slides_len {
+            cur.slide += 1;
+        }
+        if auto && !show_answer && cur.slide + 1 >= slides_len {
+            cur.buzzing_open = true;
+        }
+        Ok(())
+    }
+
+    /// Ведущий листает слайды назад.
+    pub fn prev_slide(&mut self) -> Result<(), GameError> {
+        self.active_slides_len()?; // проверка фазы/наличия вопроса
+        let cur = self.current.as_mut().expect("есть открытый вопрос");
+        if cur.slide > 0 {
+            cur.slide -= 1;
+        }
+        Ok(())
+    }
+
+    /// Закрыть вопрос после показа слайдов ответа (фаза `ShowAnswer`).
+    pub fn close_question(&mut self) -> Result<(), GameError> {
+        if self.phase != Phase::ShowAnswer {
+            return Err(GameError::WrongPhase);
+        }
+        let picker = self.pending_picker.take();
+        self.finish_question(picker);
+        Ok(())
+    }
+
+    /// Пропустить текущий вопрос без начисления очков (выбирающий не меняется).
+    /// Доступно во время вопроса/торгов/передачи/ответа/показа ответа.
+    pub fn skip_question(&mut self) -> Result<(), GameError> {
+        match self.phase {
+            Phase::Question
+            | Phase::Answering
+            | Phase::Auction
+            | Phase::CatGive
+            | Phase::ShowAnswer => {
+                self.auction = None;
+                self.pending_picker = None;
+                self.finish_question(None);
+                Ok(())
+            }
+            _ => Err(GameError::WrongPhase),
+        }
+    }
+
+    /// Ручная правка счёта игрока ведущим (на случай ошибок судейства).
+    pub fn set_score(&mut self, player: PlayerId, value: i64) -> Result<(), GameError> {
+        let p = self
+            .players
+            .iter_mut()
+            .find(|p| p.id == player)
+            .ok_or(GameError::NoSuchPlayer)?;
+        p.score = value;
+        Ok(())
+    }
+
+    /// Длина активного списка слайдов и проверка, что есть открытый вопрос
+    /// в подходящей фазе.
+    fn active_slides_len(&self) -> Result<usize, GameError> {
+        let answer = match self.phase {
+            Phase::Question | Phase::Answering => false,
+            Phase::ShowAnswer => true,
+            _ => return Err(GameError::WrongPhase),
+        };
+        let cur = self.current.as_ref().ok_or(GameError::WrongPhase)?;
+        let q = self
+            .question_at(cur.theme, cur.question)
+            .ok_or(GameError::WrongPhase)?;
+        Ok(if answer {
+            q.answer_slides.len()
+        } else {
+            q.question_slides.len()
+        })
+    }
+
+    /// Вопрос текущего раунда по индексам клетки.
+    fn question_at(&self, theme: usize, question: usize) -> Option<&crate::pack::Question> {
+        self.pack
+            .rounds
+            .get(self.round_index)
+            .and_then(|r| r.themes.get(theme))
+            .and_then(|t| t.questions.get(question))
     }
 
     /// Вердикт ведущего по ответу нажавшего игрока.
@@ -605,10 +792,10 @@ impl Game {
         if solo {
             if correct {
                 self.add_score(player, reward);
-                self.finish_question(Some(player));
+                self.end_question(Some(player));
             } else {
                 self.add_score(player, -penalty);
-                self.finish_question(None);
+                self.end_question(None);
             }
             return Ok(());
         }
@@ -616,7 +803,7 @@ impl Game {
         if correct {
             self.add_score(player, reward);
             // Угадавший становится выбирающим.
-            self.finish_question(Some(player));
+            self.end_question(Some(player));
         } else {
             self.add_score(player, -penalty);
             let all_locked = {
@@ -626,8 +813,8 @@ impl Game {
                 cur.locked_out.len() >= self.players.len()
             };
             if all_locked {
-                // Все ошиблись — вопрос закрывается, выбирающий не меняется.
-                self.finish_question(None);
+                // Все ошиблись — показываем ответ, выбирающий не меняется.
+                self.end_question(None);
             } else {
                 // Снова открываем приём нажатий для остальных.
                 self.current.as_mut().unwrap().buzzing_open = true;
@@ -642,7 +829,7 @@ impl Game {
         if self.phase != Phase::Question {
             return Err(GameError::WrongPhase);
         }
-        self.finish_question(None);
+        self.end_question(None);
         Ok(())
     }
 
@@ -855,6 +1042,28 @@ impl Game {
             .unwrap_or(0)
     }
 
+    /// Завершить розыгрыш вопроса: если у вопроса есть слайды ответа — перейти
+    /// к их показу (фаза `ShowAnswer`), иначе сразу закрыть вопрос.
+    fn end_question(&mut self, new_picker: Option<PlayerId>) {
+        let has_answer = self
+            .current
+            .as_ref()
+            .and_then(|c| self.question_at(c.theme, c.question))
+            .map(|q| !q.answer_slides.is_empty())
+            .unwrap_or(false);
+        if has_answer {
+            self.pending_picker = new_picker;
+            if let Some(c) = self.current.as_mut() {
+                c.slide = 0;
+                c.buzzed = None;
+                c.buzzing_open = false;
+            }
+            self.phase = Phase::ShowAnswer;
+        } else {
+            self.finish_question(new_picker);
+        }
+    }
+
     /// Закрыть текущий вопрос и определить следующую фазу.
     fn finish_question(&mut self, new_picker: Option<PlayerId>) {
         self.current = None;
@@ -876,7 +1085,7 @@ impl Game {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pack::{Content, Question, QuestionKind, Round, Theme};
+    use crate::pack::{Content, Question, QuestionKind, Round, Slide, Theme};
 
     /// Пак: 1 раунд, 1 тема, два вопроса (100 и 200).
     fn one_round_pack() -> Pack {
@@ -890,8 +1099,9 @@ mod tests {
                 themes: vec![Theme {
                     name: "Тема".into(),
                     questions: vec![
-                        Question { price: 100, kind: QuestionKind::Normal, content: vec![Content::Text { value: "q1".into() }], answer: "a1".into() },
-                        Question { price: 200, kind: QuestionKind::Normal, content: vec![Content::Text { value: "q2".into() }], answer: "a2".into() },
+                        // Пустой ответ -> поток без фазы показа ответа (так короче проверять очки/фазы).
+                        Question::simple(100, QuestionKind::Normal, vec![Content::Text { value: "q1".into() }], ""),
+                        Question::simple(200, QuestionKind::Normal, vec![Content::Text { value: "q2".into() }], ""),
                     ],
                 }],
             }],
@@ -915,6 +1125,7 @@ mod tests {
         // p1 выбирает первый вопрос
         g.pick(p1, 0, 0).unwrap();
         assert_eq!(g.phase(), Phase::Question);
+        g.open_buzz().unwrap(); // режим Manual: ведущий открывает кнопки
 
         // p2 нажимает и ошибается
         g.buzz(p2).unwrap();
@@ -949,6 +1160,7 @@ mod tests {
     fn all_wrong_closes_question_without_changing_picker() {
         let (mut g, p1, p2) = started_game();
         g.pick(p1, 0, 0).unwrap();
+        g.open_buzz().unwrap();
         g.buzz(p1).unwrap();
         g.judge(false).unwrap();
         g.buzz(p2).unwrap();
@@ -970,6 +1182,7 @@ mod tests {
     fn locked_out_player_cannot_buzz_again() {
         let (mut g, p1, _p2) = started_game();
         g.pick(p1, 0, 0).unwrap();
+        g.open_buzz().unwrap();
         g.buzz(p1).unwrap();
         g.judge(false).unwrap();
         assert_eq!(g.buzz(p1), Err(GameError::LockedOut));
@@ -983,11 +1196,9 @@ mod tests {
 
     /// Пак: обычный раунд (1 тема, 2 вопроса) + финал (2 темы по 1 вопросу).
     fn pack_with_final() -> Pack {
-        let q = |price, a: &str| Question {
-            price,
-            kind: QuestionKind::Normal,
-            content: vec![Content::Text { value: "q".into() }],
-            answer: a.into(),
+        // Ответ пустой -> обычные вопросы закрываются без фазы показа ответа.
+        let q = |price, _a: &str| {
+            Question::simple(price, QuestionKind::Normal, vec![Content::Text { value: "q".into() }], "")
         };
         Pack {
             name: "T".into(),
@@ -1023,10 +1234,12 @@ mod tests {
 
         // Обычный раунд: p1 берёт 100, p2 берёт 200.
         g.pick(p1, 0, 0).unwrap();
+        g.open_buzz().unwrap();
         g.buzz(p1).unwrap();
         g.judge(true).unwrap();
         assert_eq!(g.picker(), Some(p1));
         g.pick(p1, 0, 1).unwrap();
+        g.open_buzz().unwrap();
         g.buzz(p2).unwrap();
         g.judge(true).unwrap();
         // Оба вопроса сыграны, есть следующий (финальный) раунд.
@@ -1072,6 +1285,7 @@ mod tests {
         let p2 = g.add_player("P2").unwrap();
         g.start_game().unwrap();
         g.pick(p1, 0, 0).unwrap();
+        g.open_buzz().unwrap();
         g.buzz(p1).unwrap();
         g.judge(false).unwrap(); // p1 -100
         g.buzz(p2).unwrap();
@@ -1086,11 +1300,8 @@ mod tests {
 
     /// Пак с одной темой из 4 вопросов: обычный, аукцион, кот, без риска.
     fn special_pack() -> Pack {
-        let q = |kind: QuestionKind, a: &str| Question {
-            price: 100,
-            kind,
-            content: vec![Content::Text { value: "q".into() }],
-            answer: a.into(),
+        let q = |kind: QuestionKind, _a: &str| {
+            Question::simple(100, kind, vec![Content::Text { value: "q".into() }], "")
         };
         Pack {
             name: "T".into(),
@@ -1139,7 +1350,7 @@ mod tests {
         let a = g.add_player("A").unwrap();
         let _b = g.add_player("B").unwrap();
         // Настройку задаём в лобби, до старта.
-        g.set_settings(GameSettings { cat_must_give: true, no_risk_double: true }).unwrap();
+        g.set_settings(GameSettings { no_risk_double: true, ..GameSettings::default() }).unwrap();
         g.start_game().unwrap();
         g.pick(a, 0, 3).unwrap();
         g.judge(true).unwrap();
@@ -1185,7 +1396,7 @@ mod tests {
         let mut g = Game::new(special_pack(), GameConfig::default());
         let p1 = g.add_player("P1").unwrap();
         let _p2 = g.add_player("P2").unwrap();
-        g.set_settings(GameSettings { cat_must_give: false, no_risk_double: false }).unwrap();
+        g.set_settings(GameSettings { cat_must_give: false, ..GameSettings::default() }).unwrap();
         g.start_game().unwrap();
         g.pick(p1, 0, 2).unwrap();
         assert_eq!(g.phase(), Phase::CatGive);
@@ -1250,5 +1461,178 @@ mod tests {
         assert_eq!(g.phase(), Phase::Answering);
         assert_eq!(g.current().unwrap().buzzed, Some(p1));
         assert_eq!(g.current().unwrap().reward, 100);
+    }
+
+    // ------------------------- Этап 10b: слайды и управление -------------------------
+
+    /// Пак: 1 раунд, 1 тема. Вопрос 0 — 2 слайда вопроса + 2 слайда ответа;
+    /// вопрос 1 — обычный без слайдов ответа (чтобы раунд не закрывался сразу).
+    fn slides_pack() -> Pack {
+        Pack {
+            name: "S".into(),
+            author: String::new(),
+            format_version: crate::PACK_FORMAT_VERSION,
+            rounds: vec![Round {
+                name: "Р1".into(),
+                is_final: false,
+                themes: vec![Theme {
+                    name: "Тема".into(),
+                    questions: vec![
+                        Question {
+                            price: 100,
+                            kind: QuestionKind::Normal,
+                            question_slides: vec![Slide::text("слайд1"), Slide::text("слайд2")],
+                            answer_slides: vec![Slide::text("ответ1"), Slide::text("ответ2")],
+                        },
+                        Question::simple(200, QuestionKind::Normal, vec![Content::Text { value: "q2".into() }], ""),
+                    ],
+                }],
+            }],
+        }
+    }
+
+    fn slides_game() -> (Game, PlayerId, PlayerId) {
+        let mut g = Game::new(slides_pack(), GameConfig::default());
+        let p1 = g.add_player("P1").unwrap();
+        let p2 = g.add_player("P2").unwrap();
+        g.start_game().unwrap();
+        (g, p1, p2)
+    }
+
+    #[test]
+    fn manual_mode_buzz_closed_until_open() {
+        let (mut g, p1, _p2) = slides_game();
+        g.pick(p1, 0, 0).unwrap();
+        assert_eq!(g.phase(), Phase::Question);
+        assert!(!g.current().unwrap().buzzing_open);
+        // Фальстарт выключен -> раннее нажатие просто отклоняется (без блокировки).
+        assert_eq!(g.buzz(p1), Err(GameError::WrongPhase));
+        assert!(g.current().unwrap().false_started.is_empty());
+        g.open_buzz().unwrap();
+        assert!(g.current().unwrap().buzzing_open);
+        g.buzz(p1).unwrap();
+        assert_eq!(g.phase(), Phase::Answering);
+    }
+
+    #[test]
+    fn after_last_slide_mode_opens_buzz_on_last_slide() {
+        let mut g = Game::new(slides_pack(), GameConfig::default());
+        let p1 = g.add_player("P1").unwrap();
+        let _p2 = g.add_player("P2").unwrap();
+        g.set_settings(GameSettings {
+            buzz_mode: BuzzMode::AfterLastSlide,
+            ..GameSettings::default()
+        })
+        .unwrap();
+        g.start_game().unwrap();
+        g.pick(p1, 0, 0).unwrap();
+        // На первом из двух слайдов кнопки ещё закрыты.
+        assert_eq!(g.current().unwrap().slide, 0);
+        assert!(!g.current().unwrap().buzzing_open);
+        g.next_slide().unwrap();
+        // Дошли до последнего слайда -> кнопки открылись автоматически.
+        assert_eq!(g.current().unwrap().slide, 1);
+        assert!(g.current().unwrap().buzzing_open);
+    }
+
+    #[test]
+    fn after_last_slide_single_slide_opens_immediately() {
+        let mut g = Game::new(one_round_pack(), GameConfig::default());
+        let p1 = g.add_player("P1").unwrap();
+        let _p2 = g.add_player("P2").unwrap();
+        g.set_settings(GameSettings {
+            buzz_mode: BuzzMode::AfterLastSlide,
+            ..GameSettings::default()
+        })
+        .unwrap();
+        g.start_game().unwrap();
+        g.pick(p1, 0, 0).unwrap(); // один слайд -> сразу открыто
+        assert!(g.current().unwrap().buzzing_open);
+    }
+
+    #[test]
+    fn false_start_blocks_then_clears() {
+        let mut g = Game::new(slides_pack(), GameConfig::default());
+        let p1 = g.add_player("P1").unwrap();
+        let _p2 = g.add_player("P2").unwrap();
+        g.set_settings(GameSettings {
+            false_start: true,
+            ..GameSettings::default()
+        })
+        .unwrap();
+        g.start_game().unwrap();
+        g.pick(p1, 0, 0).unwrap();
+        // Нажатие до открытия кнопок -> фальстарт и блокировка.
+        assert_eq!(g.buzz(p1), Err(GameError::FalseStart));
+        assert!(g.current().unwrap().false_started.contains(&p1));
+        // Пока блок держится — даже после открытия кнопок нажать нельзя.
+        g.open_buzz().unwrap();
+        assert_eq!(g.buzz(p1), Err(GameError::LockedOut));
+        // Сервер снял блок -> снова можно нажать.
+        g.clear_false_start(p1);
+        g.buzz(p1).unwrap();
+        assert_eq!(g.phase(), Phase::Answering);
+        assert_eq!(g.current().unwrap().buzzed, Some(p1));
+    }
+
+    #[test]
+    fn show_answer_flow_then_close() {
+        let (mut g, p1, p2) = slides_game();
+        g.pick(p1, 0, 0).unwrap();
+        g.open_buzz().unwrap();
+        g.buzz(p2).unwrap();
+        g.judge(true).unwrap();
+        // У вопроса есть слайды ответа -> фаза показа ответа.
+        assert_eq!(g.phase(), Phase::ShowAnswer);
+        assert_eq!(g.current().unwrap().slide, 0);
+        g.next_slide().unwrap();
+        assert_eq!(g.current().unwrap().slide, 1);
+        g.next_slide().unwrap(); // дальше последнего не уходит
+        assert_eq!(g.current().unwrap().slide, 1);
+        g.prev_slide().unwrap();
+        assert_eq!(g.current().unwrap().slide, 0);
+        g.close_question().unwrap();
+        // Закрыт -> выбирающим стал угадавший p2.
+        assert_eq!(g.phase(), Phase::Picking);
+        assert_eq!(g.picker(), Some(p2));
+        assert_eq!(g.score(p2), Some(100));
+    }
+
+    #[test]
+    fn reveal_shows_answer_when_present() {
+        let (mut g, p1, _p2) = slides_game();
+        g.pick(p1, 0, 0).unwrap();
+        g.reveal().unwrap(); // никто не нажал, но есть слайды ответа
+        assert_eq!(g.phase(), Phase::ShowAnswer);
+        g.close_question().unwrap();
+        assert_eq!(g.phase(), Phase::Picking);
+        assert_eq!(g.picker(), Some(p1)); // выбирающий не изменился
+    }
+
+    #[test]
+    fn no_answer_slides_closes_directly() {
+        // Вопрос 1 без слайдов ответа -> после reveal сразу к выбору, без ShowAnswer.
+        let (mut g, p1, _p2) = slides_game();
+        g.pick(p1, 0, 1).unwrap();
+        g.reveal().unwrap();
+        assert_eq!(g.phase(), Phase::Picking);
+    }
+
+    #[test]
+    fn skip_question_closes_without_scoring() {
+        let (mut g, p1, _p2) = slides_game();
+        g.pick(p1, 0, 0).unwrap();
+        g.skip_question().unwrap();
+        assert_eq!(g.phase(), Phase::Picking);
+        assert_eq!(g.picker(), Some(p1)); // выбирающий не изменился
+        assert_eq!(g.score(p1), Some(0));
+    }
+
+    #[test]
+    fn set_score_corrects_player_score() {
+        let (mut g, p1, _p2) = slides_game();
+        g.set_score(p1, 777).unwrap();
+        assert_eq!(g.score(p1), Some(777));
+        assert_eq!(g.set_score(9999, 1), Err(GameError::NoSuchPlayer));
     }
 }
