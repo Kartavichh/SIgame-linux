@@ -260,6 +260,15 @@ impl Hub {
                 self.require_host(is_host)?;
                 self.game.next_round().map_err(|e| e.to_string())
             }
+            ClientMsg::SkipRound => {
+                self.require_host(is_host)?;
+                self.game.skip_round().map_err(|e| e.to_string())
+            }
+            ClientMsg::Restart => {
+                self.require_host(is_host)?;
+                self.game.restart();
+                Ok(())
+            }
             ClientMsg::RemoveTheme { theme } => {
                 let pid = pid.ok_or("ведущий не вычёркивает темы")?;
                 self.game.remove_theme(pid, theme).map_err(|e| e.to_string())

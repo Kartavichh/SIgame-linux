@@ -353,6 +353,16 @@ fn kill_host(state: &HostState) {
     }
 }
 
+/// Порт свободен для прослушивания?
+fn port_is_free(port: u16) -> bool {
+    std::net::TcpListener::bind(("127.0.0.1", port)).is_ok()
+}
+
+/// Кто-то уже принимает подключения на этом порту?
+fn server_responds(port: u16) -> bool {
+    TcpStream::connect(("127.0.0.1", port)).is_ok()
+}
+
 /// Запустить локальный сервер партии на выбранном паке.
 #[tauri::command]
 fn host_start(state: State<HostState>, pack_path: String, port: u16) -> Result<(), String> {
@@ -362,8 +372,28 @@ fn host_start(state: State<HostState>, pack_path: String, port: u16) -> Result<(
     if !Path::new(&pack_path).exists() {
         return Err(format!("файл пака не найден: {pack_path}"));
     }
-    let bin = server_binary();
 
+    // Порт занят? Скорее всего остался сервер от прошлой игры (его не закрыли).
+    // Гасим зависшие sigame-server и ждём, пока порт освободится — иначе новый
+    // сервер не поднимется, а клиент молча подключится к старой партии.
+    if !port_is_free(port) {
+        let _ = Command::new("pkill").arg("-f").arg("sigame-server").status();
+        let mut freed = false;
+        for _ in 0..20 {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            if port_is_free(port) {
+                freed = true;
+                break;
+            }
+        }
+        if !freed {
+            return Err(format!(
+                "порт {port} занят другим приложением — освободите его и повторите"
+            ));
+        }
+    }
+
+    let bin = server_binary();
     let child = Command::new(&bin)
         .arg(&pack_path)
         .arg("--port")
@@ -375,7 +405,17 @@ fn host_start(state: State<HostState>, pack_path: String, port: u16) -> Result<(
         .map_err(|e| format!("не удалось запустить сервер ({}): {e}", bin.display()))?;
 
     *state.0.lock().unwrap() = Some(child);
-    Ok(())
+
+    // Убеждаемся, что сервер действительно поднялся (а не упал из-за ошибки пака
+    // или занятого порта), прежде чем клиент попробует подключиться.
+    for _ in 0..30 {
+        if server_responds(port) {
+            return Ok(());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    kill_host(&state);
+    Err("сервер не запустился (проверьте пак или занятость порта)".into())
 }
 
 /// Остановить локальный сервер партии.

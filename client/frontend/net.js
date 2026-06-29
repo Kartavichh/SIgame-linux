@@ -53,6 +53,8 @@
     E.role = byId("net-host-role");
     E.connect = byId("net-connect");
     E.disconnect = byId("net-disconnect");
+    E.leave = byId("net-leave");
+    E.setup = byId("play-setup");
     E.status = byId("net-status");
     E.game = byId("play-game");
     E.meta = byId("play-meta");
@@ -68,6 +70,7 @@
 
     E.connect.addEventListener("click", connect);
     E.disconnect.addEventListener("click", disconnect);
+    E.leave.addEventListener("click", disconnect);
     E.hostPack.addEventListener("click", hostOwnPack);
     E.hostDemo.addEventListener("click", hostDemo);
     E.avatarBtn.addEventListener("click", pickAvatar);
@@ -280,6 +283,7 @@
     E.connect.disabled = false;
     E.disconnect.disabled = true;
     E.game.classList.add("hidden");
+    E.setup.classList.remove("hidden"); // вернуть меню подключения
     // Если соединение оборвалось само (сервер упал) — снимаем флаг хостинга.
     if (weHostServer) {
       invoke("host_stop").catch(() => {});
@@ -322,6 +326,7 @@
   function render() {
     if (!snap) return;
     E.game.classList.remove("hidden");
+    E.setup.classList.add("hidden"); // во время игры меню подключения скрыто
 
     const phaseLabel = PHASE[snap.phase] || snap.phase;
     const roleLabel = you.host ? "🎙 Ведущий" : "🎮 Игрок";
@@ -640,6 +645,16 @@
           ctrl("Начать игру", () => send({ type: "start" }), snap.players.length === 0)
         );
         break;
+      case "picking":
+        // Ведущий не выбирает клетку, но может досрочно пропустить раунд.
+        E.controls.appendChild(
+          ctrl("Пропустить раунд ▶▶", () => {
+            if (confirm("Пропустить текущий раунд и перейти к следующему?")) {
+              send({ type: "skip_round" });
+            }
+          }, false, "danger")
+        );
+        break;
       case "question":
         slideNav();
         if (cur && !cur.buzzing_open) {
@@ -671,6 +686,17 @@
         E.controls.appendChild(ctrl("Верно", () => send({ type: "final_judge", correct: true })));
         E.controls.appendChild(ctrl("Неверно", () => send({ type: "final_judge", correct: false }), false, "danger"));
         break;
+    }
+
+    // «Начать заново» — у ведущего в любой момент партии (кроме лобби).
+    if (snap.phase !== "lobby") {
+      E.controls.appendChild(
+        ctrl("↺ Начать заново", () => {
+          if (confirm("Сбросить партию и вернуться в лобби? Счёт обнулится.")) {
+            send({ type: "restart" });
+          }
+        }, false, "danger")
+      );
     }
   }
 

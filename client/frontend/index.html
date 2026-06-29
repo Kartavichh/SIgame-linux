@@ -44,20 +44,22 @@
 
   <!-- ===== Режим игры (по сети) ===== -->
   <section id="play-section" class="hidden">
-    <div class="controls">
-      <input id="net-host" type="text" value="127.0.0.1" size="12" />
-      <input id="net-port" type="number" value="7777" min="1" max="65535" />
-      <input id="net-name" type="text" placeholder="ваше имя" />
-      <label><input id="net-host-role" type="checkbox" /> я ведущий</label>
-      <span id="net-avatar-preview" class="avatar-slot" title="ваша аватарка"></span>
-      <button id="net-avatar">🖼 Аватар</button>
-      <button id="net-connect">Подключиться</button>
-      <button id="net-disconnect" disabled>Отключиться</button>
-    </div>
-    <div class="controls">
-      <span class="host-hint">Принимать игру у себя:</span>
-      <button id="net-host-pack">🎮 Запустить свой пак</button>
-      <button id="net-host-demo">▶ Демо-пак</button>
+    <div id="play-setup">
+      <div class="controls">
+        <input id="net-host" type="text" value="127.0.0.1" size="12" />
+        <input id="net-port" type="number" value="7777" min="1" max="65535" />
+        <input id="net-name" type="text" placeholder="ваше имя" />
+        <label><input id="net-host-role" type="checkbox" /> я ведущий</label>
+        <span id="net-avatar-preview" class="avatar-slot" title="ваша аватарка"></span>
+        <button id="net-avatar">🖼 Аватар</button>
+        <button id="net-connect">Подключиться</button>
+        <button id="net-disconnect" disabled>Отключиться</button>
+      </div>
+      <div class="controls">
+        <span class="host-hint">Принимать игру у себя:</span>
+        <button id="net-host-pack">🎮 Запустить свой пак</button>
+        <button id="net-host-demo">▶ Демо-пак</button>
+      </div>
     </div>
     <p id="net-status" class="status"></p>
 
@@ -65,6 +67,7 @@
       <div class="play-top">
         <div id="play-host" class="play-host"></div>
         <div id="play-meta" class="play-meta"></div>
+        <button id="net-leave" class="play-leave">🚪 Выйти</button>
       </div>
       <main id="play-main" class="play-main"></main>
       <div id="play-controls" class="play-controls"></div>

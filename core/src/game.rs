@@ -846,6 +846,44 @@ impl Game {
         if self.phase != Phase::RoundOver {
             return Err(GameError::WrongPhase);
         }
+        self.advance_round();
+        Ok(())
+    }
+
+    /// Досрочно пропустить текущий раунд и перейти к следующему (или завершить
+    /// игру, если это был последний). Делает ведущий из фазы выбора клетки или
+    /// конца раунда; недоигранные клетки просто отбрасываются.
+    pub fn skip_round(&mut self) -> Result<(), GameError> {
+        if self.phase != Phase::Picking && self.phase != Phase::RoundOver {
+            return Err(GameError::WrongPhase);
+        }
+        if self.round_index + 1 >= self.pack.rounds.len() {
+            self.phase = Phase::GameOver;
+            return Ok(());
+        }
+        self.advance_round();
+        Ok(())
+    }
+
+    /// Перезапустить партию: вернуться в лобби, обнулить счёт и сбросить ход.
+    /// Работает из любой фазы (в т.ч. посреди недоигранной партии). Игроки
+    /// остаются подключёнными (их аватарки хранит сервер). Делает ведущий.
+    pub fn restart(&mut self) {
+        self.phase = Phase::Lobby;
+        self.round_index = 0;
+        self.used.clear();
+        self.picker = None;
+        self.current = None;
+        self.auction = None;
+        self.finale = None;
+        self.pending_picker = None;
+        for p in &mut self.players {
+            p.score = 0;
+        }
+    }
+
+    /// Перейти к следующему раунду (вызывающий гарантирует, что он есть).
+    fn advance_round(&mut self) {
         self.round_index += 1;
         self.used.clear();
         if self.pack.rounds[self.round_index].is_final {
@@ -853,7 +891,6 @@ impl Game {
         } else {
             self.phase = Phase::Picking;
         }
-        Ok(())
     }
 
     // --------------------------- Финальный раунд ---------------------------
@@ -1296,6 +1333,47 @@ mod tests {
         g.next_round().unwrap();
         // Нет игроков со счётом > 0 -> сразу конец игры.
         assert_eq!(g.phase(), Phase::GameOver);
+    }
+
+    #[test]
+    fn skip_round_advances_midway() {
+        // Ведущий пропускает недоигранный раунд -> сразу следующий (финал).
+        let mut g = Game::new(pack_with_final(), GameConfig::default());
+        let p1 = g.add_player("P1").unwrap();
+        g.add_player("P2").unwrap();
+        g.start_game().unwrap();
+        g.set_score(p1, 100).unwrap(); // есть игрок с плюсом -> финал состоится
+        assert_eq!(g.phase(), Phase::Picking);
+        assert_eq!(g.round_index(), 0);
+        g.skip_round().unwrap();
+        assert_eq!(g.round_index(), 1);
+        assert_ne!(g.phase(), Phase::Picking); // начался финал
+    }
+
+    #[test]
+    fn skip_round_on_last_round_ends_game() {
+        // Пропуск единственного/последнего раунда завершает игру.
+        let mut g = Game::new(one_round_pack(), GameConfig::default());
+        g.add_player("P1").unwrap();
+        g.start_game().unwrap();
+        assert_eq!(g.phase(), Phase::Picking);
+        g.skip_round().unwrap();
+        assert_eq!(g.phase(), Phase::GameOver);
+    }
+
+    #[test]
+    fn restart_returns_to_lobby_and_clears_scores() {
+        let mut g = Game::new(one_round_pack(), GameConfig::default());
+        let p1 = g.add_player("P1").unwrap();
+        g.start_game().unwrap();
+        g.set_score(p1, 300).unwrap();
+        assert_ne!(g.phase(), Phase::Lobby);
+        g.restart();
+        assert_eq!(g.phase(), Phase::Lobby);
+        assert_eq!(g.score(p1), Some(0));
+        // После перезапуска партию можно начать заново.
+        g.start_game().unwrap();
+        assert_eq!(g.phase(), Phase::Picking);
     }
 
     /// Пак с одной темой из 4 вопросов: обычный, аукцион, кот, без риска.
