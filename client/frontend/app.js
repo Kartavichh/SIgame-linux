@@ -9,6 +9,8 @@ let state = {
   mediaBase: "",     // базовый URL медиа-сервера, http://127.0.0.1:порт/
   roundIndex: 0,     // выбранный раунд
   used: new Set(),   // ключи "r-t-q" уже открытых вопросов
+  // Текущий открытый вопрос (слайдовый просмотр):
+  viewer: null,      // { qSlides, aSlides, showingAnswer, index }
 };
 
 // --- Элементы интерфейса ---
@@ -18,36 +20,67 @@ const els = {
   board: document.getElementById("board"),
   overlay: document.getElementById("overlay"),
   questionContent: document.getElementById("question-content"),
-  answer: document.getElementById("answer"),
-  pathInput: document.getElementById("path-input"),
+  slidePhase: document.getElementById("slide-phase"),
+  slideIndicator: document.getElementById("slide-indicator"),
+  btnPrev: document.getElementById("btn-prev-slide"),
+  btnNext: document.getElementById("btn-next-slide"),
+  btnAnswer: document.getElementById("btn-answer"),
 };
 
 // --- Кнопки ---
 document.getElementById("btn-demo").addEventListener("click", openDemo);
-document.getElementById("btn-open").addEventListener("click", () => {
-  const path = els.pathInput.value.trim();
-  if (path) loadPack(path);
-});
-document.getElementById("btn-answer").addEventListener("click", () => {
-  els.answer.classList.remove("hidden");
-});
+document.getElementById("btn-open").addEventListener("click", openPackDialog);
+els.btnPrev.addEventListener("click", () => moveSlide(-1));
+els.btnNext.addEventListener("click", () => moveSlide(1));
+els.btnAnswer.addEventListener("click", showAnswer);
 document.getElementById("btn-close").addEventListener("click", closeOverlay);
 
 // --- Загрузка пака ---
 async function openDemo() {
   try {
     const path = await invoke("demo_pack_path");
-    els.pathInput.value = path;
     await loadPack(path);
   } catch (e) {
     showError(e);
   }
 }
 
+// Открывает системный диалог выбора .sgpack (как в редакторе).
+async function openPackDialog() {
+  try {
+    const path = await openDialog({
+      filters: [{ name: "SIGame pack", extensions: ["sgpack"] }],
+    });
+    if (path) await loadPack(path);
+  } catch (e) {
+    showError(e);
+  }
+}
+
+// Нативный диалог открытия файла (плагин tauri-plugin-dialog).
+async function openDialog(opts) {
+  const res = await invoke("plugin:dialog|open", {
+    options: { multiple: false, directory: false, ...opts },
+  });
+  // Диалог может вернуть строку, массив или объект {path} — приводим к строке.
+  if (!res) return null;
+  if (typeof res === "string") return res;
+  if (Array.isArray(res)) return res.length ? normalizePath(res[0]) : null;
+  if (res.path) return res.path;
+  return null;
+}
+
+function normalizePath(res) {
+  if (!res) return null;
+  if (typeof res === "string") return res;
+  if (res.path) return res.path;
+  return null;
+}
+
 async function loadPack(path) {
   try {
     setStatus("Загрузка…");
-    const pack = window.legacyizePack(await invoke("open_pack", { path }));
+    const pack = await invoke("open_pack", { path });
     state.pack = pack;
     state.mediaBase = await invoke("media_base_url");
     state.roundIndex = 0;
@@ -108,18 +141,80 @@ function renderBoard() {
   });
 }
 
-// --- Открытие вопроса ---
+// --- Открытие вопроса (слайдовый просмотр) ---
+// Вопрос — это последовательность слайдов (question_slides), затем по кнопке
+// «Показать ответ» — слайды ответа (answer_slides). Ведущий листает их вручную,
+// как в SIGame.
 function openQuestion(question, key) {
   state.used.add(key);
 
+  const qSlides = slidesOf(question.question_slides);
+  let aSlides = slidesOf(question.answer_slides);
+  // Если слайдов ответа нет вовсе — показываем заглушку, чтобы «Показать ответ»
+  // всё равно что-то открывал.
+  if (aSlides.length === 0) aSlides = [[{ type: "text", value: "—" }]];
+
+  state.viewer = { qSlides, aSlides, showingAnswer: false, index: 0 };
+  els.overlay.classList.remove("hidden");
+  renderSlide();
+}
+
+// Нормализует слайды из пака в массив массивов-блоков: [[item, item], [item]].
+// Терпимо относится к отсутствию слайдов/пустым полям.
+function slidesOf(slides) {
+  if (!Array.isArray(slides)) return [];
+  return slides.map((s) => (s && Array.isArray(s.items) ? s.items : []));
+}
+
+// Текущий список слайдов (вопрос или ответ).
+function activeSlides() {
+  const v = state.viewer;
+  return v.showingAnswer ? v.aSlides : v.qSlides;
+}
+
+// Рисует текущий слайд + обновляет навигацию.
+function renderSlide() {
+  const v = state.viewer;
+  const slides = activeSlides();
+  const items = slides[v.index] || [];
+
   els.questionContent.innerHTML = "";
-  for (const item of question.content) {
+  for (const item of items) {
     els.questionContent.appendChild(renderContent(item));
   }
 
-  els.answer.textContent = `Ответ: ${question.answer || "—"}`;
-  els.answer.classList.add("hidden");
-  els.overlay.classList.remove("hidden");
+  // Подпись фазы и индикатор «слайд N из M».
+  const phase = v.showingAnswer ? "Ответ" : "Вопрос";
+  els.slidePhase.textContent = phase;
+  els.slidePhase.classList.toggle("answer-phase", v.showingAnswer);
+  els.slideIndicator.textContent =
+    slides.length > 1 ? `слайд ${v.index + 1} из ${slides.length}` : "";
+
+  // Навигация: «Назад» доступна не на первом слайде; «Далее» — не на последнем.
+  els.btnPrev.disabled = v.index === 0;
+  els.btnNext.disabled = v.index >= slides.length - 1;
+  // «Показать ответ» — только пока показываем вопрос.
+  els.btnAnswer.classList.toggle("hidden", v.showingAnswer);
+}
+
+// Листание в пределах текущей фазы.
+function moveSlide(delta) {
+  const v = state.viewer;
+  if (!v) return;
+  const slides = activeSlides();
+  const next = v.index + delta;
+  if (next < 0 || next >= slides.length) return;
+  v.index = next;
+  renderSlide();
+}
+
+// Переход к слайдам ответа.
+function showAnswer() {
+  const v = state.viewer;
+  if (!v || v.showingAnswer) return;
+  v.showingAnswer = true;
+  v.index = 0;
+  renderSlide();
 }
 
 // Создаёт DOM-элемент для одной единицы содержимого.
@@ -192,6 +287,7 @@ function closeOverlay() {
   // Останавливаем возможное воспроизведение, очищая содержимое.
   els.questionContent.innerHTML = "";
   els.overlay.classList.add("hidden");
+  state.viewer = null;
   renderBoard(); // обновить «использованные» клетки
 }
 

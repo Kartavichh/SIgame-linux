@@ -1,0 +1,27 @@
+# Сборка клиента/сервера SIGame-RS на Ubuntu 22.04 (glibc 2.35).
+# Зачем: бинарь, собранный на свежей Ubuntu 24.04 (glibc 2.39), не запускается на
+# более старых системах ("GLIBC_2.39 not found"). Собранный здесь — работает на
+# Ubuntu 22.04 и всех новее.
+#
+# 22.04 — нижний предел: Tauri v2 требует webkit2gtk-4.1 (есть с 22.04).
+FROM ubuntu:22.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Системные зависимости Tauri + сборка + AppImage (libfuse2 для linuxdeploy).
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      build-essential curl wget file ca-certificates \
+      libwebkit2gtk-4.1-dev libxdo-dev libssl-dev \
+      libayatana-appindicator3-dev librsvg2-dev \
+      libfuse2 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Rust (stable).
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y \
+      --default-toolchain stable --profile minimal
+ENV PATH="/root/.cargo/bin:${PATH}"
+
+# Tauri CLI.
+RUN cargo install tauri-cli --version '^2' --locked
+
+WORKDIR /src

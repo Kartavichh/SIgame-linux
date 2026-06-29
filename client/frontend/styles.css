@@ -97,12 +97,20 @@ input[type="text"] {
 .question-content { font-size: 1.5rem; line-height: 1.5; }
 .question-content img,
 .question-content video { max-width: 100%; max-height: 55vh; border-radius: .5rem; }
-.answer {
-  margin-top: 1.2rem; padding-top: 1rem;
-  border-top: 1px solid #ffffff22;
-  font-size: 1.3rem; color: #6cf09a;
-}
 .card-buttons { margin-top: 1.5rem; display: flex; gap: .8rem; justify-content: center; }
+
+/* Слайдовый просмотр вопроса */
+.slide-phase {
+  font-size: .9rem; text-transform: uppercase; letter-spacing: .05em;
+  color: #8aa; margin-bottom: .8rem;
+}
+.slide-phase.answer-phase { color: #6cf09a; }
+.slide-nav {
+  margin-top: 1.2rem; display: flex; gap: .8rem;
+  align-items: center; justify-content: center;
+}
+.slide-indicator { color: #8aa; min-width: 8rem; font-size: .95rem; }
+.slide-nav button:disabled { opacity: .35; cursor: default; }
 
 /* Переключатель режимов */
 .modes { display: flex; gap: .5rem; margin-left: auto; }

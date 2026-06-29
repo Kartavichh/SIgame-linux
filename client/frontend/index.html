@@ -20,8 +20,7 @@
   <section id="view-section">
     <div class="controls">
       <button id="btn-demo">Открыть демо-пак</button>
-      <input id="path-input" type="text" placeholder="путь к .sgpack" />
-      <button id="btn-open">Открыть</button>
+      <button id="btn-open">Открыть .sgpack</button>
     </div>
     <p id="status" class="status"></p>
     <nav id="rounds" class="rounds"></nav>
@@ -76,9 +75,14 @@
   <!-- Оверлей вопроса (режим просмотра) -->
   <div id="overlay" class="overlay hidden">
     <div class="card">
+      <div id="slide-phase" class="slide-phase"></div>
       <div id="question-content" class="question-content"></div>
       <p id="media-debug" class="status"></p>
-      <div id="answer" class="answer hidden"></div>
+      <div class="slide-nav">
+        <button id="btn-prev-slide">◀ Назад</button>
+        <span id="slide-indicator" class="slide-indicator"></span>
+        <button id="btn-next-slide">Далее ▶</button>
+      </div>
       <div class="card-buttons">
         <button id="btn-answer">Показать ответ</button>
         <button id="btn-close">Закрыть</button>
