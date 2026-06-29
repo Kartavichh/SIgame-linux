@@ -11,8 +11,11 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-echo "==> Сборка сервера (sigame-server)…"
-cargo build --release -p sigame-server
+echo "==> Сборка сервера + подготовка sidecar для клиента…"
+# Собирает sigame-server и кладёт его как sidecar (binaries/sigame-server-<triple>),
+# чтобы Tauri вшил сервер в .deb/AppImage (externalBin). Файл нужен ещё и на этапе
+# компиляции клиента, поэтому делаем это ДО сборки клиента.
+./scripts/prep-sidecar.sh
 
 echo "==> Сборка клиента (Tauri: .deb + AppImage)…"
 # Нужны системные зависимости Tauri (см. README). AppImage подкачивает linuxdeploy.

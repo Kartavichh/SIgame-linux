@@ -4,6 +4,8 @@
 
 # Сборочные артефакты Tauri
 /client/src-tauri/gen
+# Sidecar-бинарь (генерируется scripts/prep-sidecar.sh перед сборкой клиента)
+/client/src-tauri/binaries
 
 # Системное
 .DS_Store
