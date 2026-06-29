@@ -210,6 +210,17 @@ fn editor_save(path: String, pack: Pack, state: State<EditorState>) -> Result<()
     Ok(())
 }
 
+/// Экспортировать текущий пак редактора в формат SIGame `.siq`.
+#[tauri::command]
+fn export_siq(path: String, pack: Pack, state: State<EditorState>) -> Result<(), String> {
+    let mut guard = state.0.lock().unwrap();
+    guard.pack = pack;
+    let refs = guard.pack.media_references();
+    guard.media.retain(|name, _| refs.contains(name));
+    sigame_core::export_siq(&guard, &path).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 /// Подбирает уникальное имя медиа: то же имя — если файл новый или совпадает
 /// побайтно; иначе добавляет суффикс `_1`, `_2`, …
 fn unique_media_name(media: &BTreeMap<String, Vec<u8>>, base: &str, bytes: &[u8]) -> String {
@@ -594,6 +605,7 @@ fn main() {
             editor_new,
             editor_load,
             import_siq,
+            export_siq,
             editor_add_media,
             editor_save,
             net_connect,

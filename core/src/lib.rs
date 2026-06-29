@@ -13,10 +13,12 @@ pub mod error;
 pub mod game;
 pub mod pack;
 pub mod siq;
+pub mod siq_export;
 
 pub use archive::PackArchive;
 pub use error::{PackError, Result};
 pub use siq::import_siq;
+pub use siq_export::{export_siq, export_siq_bytes};
 pub use game::{
     AuctionState, BuzzMode, CurrentQuestion, FinalState, Game, GameConfig, GameError, GameSettings,
     Phase, Player, PlayerId,

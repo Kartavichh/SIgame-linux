@@ -21,6 +21,7 @@ byId("ed-new").addEventListener("click", edNew);
 byId("ed-open").addEventListener("click", edOpen);
 byId("ed-import-siq").addEventListener("click", edImportSiq);
 byId("ed-save").addEventListener("click", edSave);
+byId("ed-export-siq").addEventListener("click", edExportSiq);
 E.name.addEventListener("input", () => { if (model) model.name = E.name.value; });
 E.author.addEventListener("input", () => { if (model) model.author = E.author.value; });
 
@@ -92,6 +93,22 @@ async function edSave() {
     setStatus(`Сохранено: ${path}`, true);
   } catch (e) {
     setStatus(`Ошибка: ${e}`);
+  }
+}
+
+async function edExportSiq() {
+  model.name = E.name.value;
+  model.author = E.author.value;
+  const path = await saveDialog({
+    defaultPath: `${model.name || "pack"}.siq`,
+    filters: [{ name: "SIGame .siq", extensions: ["siq"] }],
+  });
+  if (!path) return;
+  try {
+    await invoke("export_siq", { path, pack: model });
+    setStatus(`Экспортировано в .siq: ${path}`, true);
+  } catch (e) {
+    setStatus(`Ошибка экспорта .siq: ${e}`);
   }
 }
 

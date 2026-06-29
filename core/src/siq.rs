@@ -539,6 +539,26 @@ fn parse_dom(xml: &str) -> std::result::Result<Node, String> {
                     top.text.push_str(&t);
                 }
             }
+            // Ссылка на сущность (`&quot;`, `&#34;` и т. п.) — quick-xml отдаёт её
+            // отдельным событием, а не внутри текста. Раскрываем сами, иначе
+            // экранированные символы (кавычки, &, <) терялись бы.
+            Ok(Event::GeneralRef(e)) => {
+                if let Some(top) = stack.last_mut() {
+                    if let Some(c) = e.resolve_char_ref().map_err(|err| err.to_string())? {
+                        top.text.push(c);
+                    } else {
+                        let name = std::str::from_utf8(&e).unwrap_or("");
+                        top.text.push_str(match name {
+                            "lt" => "<",
+                            "gt" => ">",
+                            "amp" => "&",
+                            "quot" => "\"",
+                            "apos" => "'",
+                            _ => "", // незнакомая сущность — пропускаем
+                        });
+                    }
+                }
+            }
             _ => {}
         }
     }
@@ -812,5 +832,27 @@ mod tests {
             Err(PackError::Siq(msg)) => assert!(msg.contains("content.xml")),
             other => panic!("ожидали ошибку Siq про content.xml, получили {other:?}"),
         }
+    }
+
+    #[test]
+    fn xml_entities_in_text_are_preserved() {
+        // Сущности (&quot; &amp; &lt; &#34;) quick-xml отдаёт отдельными событиями —
+        // импортёр должен их раскрывать, а не терять.
+        const XML: &str = r#"<?xml version="1.0" encoding="utf-8"?>
+<package name="A &amp; B" version="4" xmlns="http://vladimirkhil.com/ygpackage3.0.xsd">
+  <rounds><round name="Р"><themes><theme name="Т"><questions>
+    <question price="100">
+      <scenario><atom>Что значит 5 &lt; 6 &amp; &quot;да&quot;?</atom></scenario>
+      <right><answer>Дуэйн &quot;Скала&quot; Джонсон &amp; Ко</answer></right>
+    </question>
+  </questions></theme></themes></round></rounds>
+</package>"#;
+        let (archive, _) = import_bytes(&make_siq(XML, &[])).unwrap();
+        assert_eq!(archive.pack.name, "A & B");
+        let q = &archive.pack.rounds[0].themes[0].questions[0];
+        assert_eq!(q.question_slides[0].items[0], Content::Text {
+            value: r#"Что значит 5 < 6 & "да"?"#.into()
+        });
+        assert_eq!(q.answer_text(), r#"Дуэйн "Скала" Джонсон & Ко"#);
     }
 }
